@@ -52,9 +52,14 @@ def get_stock_indicators(symbol: str, period: str = "1y") -> dict[str, Any]:
     """Return the latest RSI, EMA, and MACD values for an NSE symbol.
 
     Symbols from Kite are plain NSE symbols, while Yahoo Finance expects the
-    ``.NS`` suffix. Existing suffixes are preserved.
+    ``.NS`` suffix. The Kite ``-BE`` series suffix is removed before lookup.
     """
-    yahoo_symbol = symbol if symbol.upper().endswith(".NS") else f"{symbol}.NS"
+    normalized_symbol = symbol.strip()
+    has_nse_suffix = normalized_symbol.upper().endswith(".NS")
+    base_symbol = normalized_symbol[:-3] if has_nse_suffix else normalized_symbol
+    if base_symbol.upper().endswith("-BE"):
+        base_symbol = base_symbol[:-3]
+    yahoo_symbol = f"{base_symbol}.NS"
     try:
         history = yf.Ticker(yahoo_symbol).history(period=period, auto_adjust=False)
         if history.empty or "Close" not in history:
