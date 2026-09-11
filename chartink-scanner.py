@@ -51,4 +51,18 @@ def scan_chartink_symbols() -> list[dict[str, Any]]:
 					"indicators": indicators,
 				}
 			)
+
+	def sort_value(row: dict[str, Any], key: str) -> tuple[bool, float]:
+		value = row["indicators"].get(key)
+		return (value is None, -(float(value) if value is not None else 0.0))
+
+	results.sort(
+		key=lambda row: (
+			row["sector"].casefold(),
+			row["industry"].casefold(),
+			sort_value(row, "rsi"),
+			sort_value(row, "weekly_rsi_14"),
+			sort_value(row, "monthly_rsi_14"),
+		)
+	)
 	return results
