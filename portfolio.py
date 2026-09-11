@@ -45,7 +45,10 @@ def home() -> Response:
         symbol = holding.get("tradingsymbol", "")
         clean_symbol = symbol.removesuffix("-BE")
         holding["tradingsymbol"] = clean_symbol
-        holding["indicators"] = get_stock_indicators(clean_symbol)
+        holding["indicators"] = get_stock_indicators(
+            clean_symbol,
+            current_price=holding.get("last_price"),
+        )
 
     return render_holdings(holdings)
 
@@ -54,7 +57,7 @@ def render_holdings(holdings: list[dict]) -> HTMLResponse:
     """Render holdings and technical indicators in the portfolio page."""
     rows = "".join(_holding_row(holding) for holding in holdings)
     if not rows:
-        rows = "<tr><td colspan='13'>No holdings found.</td></tr>"
+        rows = "<tr><td colspan='15'>No holdings found.</td></tr>"
 
     return HTMLResponse(
         f"""<!doctype html>
@@ -69,7 +72,8 @@ th:first-child, td:first-child {{ text-align: left; }}
 <h2>Your Holdings ({len(holdings)})</h2>
 <table><thead><tr>
 <th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
-<th>RSI (14)</th><th>EMA 10</th><th>EMA 20</th><th>EMA 50</th><th>EMA 200</th>
+<th>RSI (14)</th><th>Weekly RSI (14)</th><th>Monthly RSI (14)</th>
+<th>EMA 10</th><th>EMA 20</th><th>EMA 50</th><th>EMA 200</th>
 <th>MACD</th><th>MACD Signal</th><th>MACD Histogram</th>
 </tr></thead><tbody>{rows}</tbody></table>
 </body></html>"""
@@ -86,6 +90,8 @@ def _holding_row(holding: dict) -> str:
     indicators = holding.get("indicators", {})
     indicator_keys = (
         "rsi",
+        "weekly_rsi_14",
+        "monthly_rsi_14",
         "ema_10",
         "ema_20",
         "ema_50",
@@ -95,7 +101,7 @@ def _holding_row(holding: dict) -> str:
         "macd_histogram",
     )
     if indicators.get("indicator_error"):
-        indicator_cells = "<td colspan='8'>N/A</td>"
+        indicator_cells = "<td colspan='10'>N/A</td>"
     else:
         indicator_cells = "".join(
             f"<td>{_display_value(indicators.get(key))}</td>"
