@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html
+import importlib.util
 import threading
 import webbrowser
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -24,6 +26,19 @@ APP_PORT = 8000
 APP_URL = f"http://{APP_HOST}:{APP_PORT}"
 app = FastAPI(title="Zerodha Portfolio")
 app.include_router(session_router)
+
+
+def _load_chartink_scanner():
+    """Load the hyphenated scanner module from this project directory."""
+    scanner_path = Path(__file__).with_name("chartink-scanner.py")
+    module_spec = importlib.util.spec_from_file_location(
+        "chartink_scanner", scanner_path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise ImportError(f"Could not load {scanner_path.name}")
+    scanner = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(scanner)
+    return scanner
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -53,6 +68,20 @@ def home() -> Response:
     return render_holdings(holdings)
 
 
+@app.get("/chartink-scanner", response_class=HTMLResponse)
+def chartink_scanner_dashboard() -> HTMLResponse:
+    """Display Chartink CSV symbols with the same technical indicators."""
+    try:
+        scanner = _load_chartink_scanner()
+        rows = scanner.scan_chartink_symbols()
+    except Exception as error:
+        return HTMLResponse(
+            f"<h3>Chartink scanner failed: {_display_value(error)}</h3>",
+            status_code=500,
+        )
+    return render_chartink_dashboard(rows)
+
+
 def render_holdings(holdings: list[dict]) -> HTMLResponse:
     """Render holdings and technical indicators in the portfolio page."""
     rows = "".join(_holding_row(holding) for holding in holdings)
@@ -70,6 +99,7 @@ th {{ background: #387ed1; color: white; }}
 th:first-child, td:first-child {{ text-align: left; }}
 </style></head><body>
 <h2>Your Holdings ({len(holdings)})</h2>
+<p><a href="/chartink-scanner">Chartink Scanner</a></p>
 <table><thead><tr>
 <th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
 <th>RSI (14)</th><th>Weekly RSI (14)</th><th>Monthly RSI (14)</th>
@@ -77,6 +107,61 @@ th:first-child, td:first-child {{ text-align: left; }}
 <th>MACD Histogram</th>
 </tr></thead><tbody>{rows}</tbody></table>
 </body></html>"""
+    )
+
+
+def render_chartink_dashboard(rows: list[dict]) -> HTMLResponse:
+    """Render enriched Chartink rows in a portfolio-style dashboard."""
+    table_rows = "".join(_chartink_row(row) for row in rows)
+    if not table_rows:
+        table_rows = "<tr><td colspan='15'>No Chartink symbols found.</td></tr>"
+    return HTMLResponse(
+        f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Chartink Scanner</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 32px; color: #17202a; }}
+table {{ border-collapse: collapse; white-space: nowrap; }}
+th, td {{ border: 1px solid #d7dee3; padding: 8px; text-align: right; }}
+th {{ background: #387ed1; color: white; }}
+th:first-child, td:first-child, td:nth-child(2) {{ text-align: left; }}
+a {{ display: inline-block; margin-bottom: 16px; }}
+</style></head><body>
+<h2>Chartink Scanner ({len(rows)})</h2>
+<p><a href="/">Back to Portfolio</a></p>
+<table><thead><tr>
+<th>Symbol</th><th>Stock Name</th><th>Close</th><th>Change %</th><th>Volume</th>
+<th>Sector</th><th>Industry</th><th>RSI (14)</th><th>Weekly RSI (14)</th>
+<th>Monthly RSI (14)</th><th>EMA 10</th><th>EMA 20</th><th>EMA 50</th>
+<th>EMA 200</th><th>MACD Histogram</th>
+</tr></thead><tbody>{table_rows}</tbody></table>
+</body></html>"""
+    )
+
+
+def _chartink_row(row: dict) -> str:
+    """Render one enriched Chartink result."""
+    indicators = row.get("indicators", {})
+    indicator_keys = (
+        "rsi", "weekly_rsi_14", "monthly_rsi_14", "ema_10", "ema_20",
+        "ema_50", "ema_200", "macd_histogram",
+    )
+    if indicators.get("indicator_error"):
+        indicator_cells = "<td colspan='8'>N/A</td>"
+    else:
+        indicator_cells = "".join(
+            f"<td>{_display_value(indicators.get(key))}</td>"
+            for key in indicator_keys
+        )
+    return (
+        "<tr>"
+        f"<td>{_display_value(row.get('symbol'))}</td>"
+        f"<td>{_display_value(row.get('stock_name'))}</td>"
+        f"<td>{_display_value(row.get('close'))}</td>"
+        f"<td>{_display_value(row.get('change'))}</td>"
+        f"<td>{_display_value(row.get('volume'))}</td>"
+        f"<td>{_display_value(row.get('sector'))}</td>"
+        f"<td>{_display_value(row.get('industry'))}</td>"
+        f"{indicator_cells}</tr>"
     )
 
 
