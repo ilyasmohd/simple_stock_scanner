@@ -123,7 +123,7 @@ def render_chartink_dashboard(
     """Render enriched Chartink rows in a portfolio-style dashboard."""
     table_rows = "".join(_chartink_row(row) for row in rows)
     if not table_rows:
-        table_rows = "<tr><td colspan='17'>No Chartink symbols found.</td></tr>"
+        table_rows = "<tr><td colspan='18'>No Chartink symbols found.</td></tr>"
     status_counts = {"NEW": 0, "CONTINUING": 0}
     for row in rows:
         status = row.get("scan_status")
@@ -133,19 +133,33 @@ def render_chartink_dashboard(
     if not dropped_table_rows:
         dropped_table_rows = "<tr><td colspan='5'>None since the previous scan.</td></tr>"
     scan_label = latest_scan or "No database scan yet"
+    sectors = sorted({str(row.get("sector") or "") for row in rows if row.get("sector")})
+    sector_options = "".join(
+        f"<option value=\"{html.escape(sector, quote=True)}\">{_display_value(sector)}</option>"
+        for sector in sectors
+    )
     return HTMLResponse(
         f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Chartink Scanner</title>
 <style>
 body {{ font-family: system-ui, sans-serif; margin: 32px; color: #17202a; }}
-table {{ border-collapse: collapse; white-space: nowrap; }}
+table {{ border-collapse: separate; border-spacing: 0; white-space: nowrap; }}
 th, td {{ border: 1px solid #d7dee3; padding: 8px; text-align: right; }}
-th {{ background: #387ed1; color: white; }}
+th {{ background: #387ed1; color: white; position: sticky; top: 0; z-index: 2; }}
+thead tr.filter-row th {{ background: #eaf1f8; padding: 5px; top: 38px; z-index: 3; }}
+thead input, thead select {{ box-sizing: border-box; min-width: 92px; width: 100%; padding: 6px; border: 1px solid #b7c7d6; border-radius: 3px; background: white; color: #17202a; }}
+thead select {{ min-width: 120px; }}
 th:first-child, td:first-child, td:nth-child(2) {{ text-align: left; }}
 a {{ display: inline-block; margin-bottom: 16px; }}
 .summary {{ display: flex; gap: 24px; margin: 16px 0; }}
 .summary strong {{ font-size: 1.25rem; }}
 h3 {{ margin-top: 32px; }}
+.grid-toolbar {{ display: flex; align-items: center; gap: 12px; margin: 12px 0 8px; }}
+.grid-toolbar button {{ padding: 7px 12px; border: 1px solid #9fb3c5; border-radius: 3px; background: white; cursor: pointer; }}
+.grid-scroll {{ max-height: 68vh; overflow: auto; border: 1px solid #b7c7d6; }}
+.grid-scroll table {{ min-width: 1600px; width: 100%; }}
+.grid-scroll tbody tr:nth-child(even) {{ background: #f7f9fb; }}
+.grid-scroll tbody tr:hover {{ background: #e8f1fa; }}
 </style></head><body>
 <h2>Chartink Scanner ({len(rows)})</h2>
 <p>Latest stored scan: <strong>{_display_value(scan_label)}</strong></p>
@@ -155,15 +169,62 @@ h3 {{ margin-top: 32px; }}
 <div><strong>{len(dropped_rows)}</strong><br>Dropped</div>
 </div>
 <p><a href="/">Back to Portfolio</a></p>
-<table><thead><tr>
+<div class="grid-toolbar">
+<strong id="visible-count">Showing {len(rows)} of {len(rows)}</strong>
+<button type="button" id="clear-filters">Clear filters</button>
+</div>
+<div class="grid-scroll">
+<table id="scanner-grid"><thead><tr>
 <th>Symbol</th><th>Stock Name</th><th>Status</th><th>Streak</th><th>Close</th><th>Change %</th><th>Volume</th>
-<th>Sector</th><th>Industry</th><th>RSI (14)</th><th>Weekly RSI (14)</th>
+<th>Sector</th><th>Industry</th><th>Close vs EMA 10 %</th><th>RSI (14)</th><th>Weekly RSI (14)</th>
 <th>Monthly RSI (14)</th><th>EMA 10</th><th>EMA 20</th><th>EMA 50</th>
 <th>EMA 200</th><th>MACD Histogram</th>
-</tr></thead><tbody>{table_rows}</tbody></table>
+</tr><tr class="filter-row">
+<th><input type="search" data-filter-column="0" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="1" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="2" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="3" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="4" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="5" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="6" placeholder="Filter"></th>
+<th><select data-filter-column="7"><option value="">All sectors</option>{sector_options}</select></th>
+<th><input type="search" data-filter-column="8" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="9" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="10" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="11" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="12" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="13" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="14" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="15" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="16" placeholder="Filter"></th>
+<th><input type="search" data-filter-column="17" placeholder="Filter"></th>
+</tr></thead><tbody>{table_rows}</tbody></table></div>
 <h3>Dropped Since Previous Scan ({len(dropped_rows)})</h3>
 <table><thead><tr><th>Symbol</th><th>Stock Name</th><th>Close</th><th>Sector</th><th>Industry</th></tr></thead>
 <tbody>{dropped_table_rows}</tbody></table>
+<script>
+const grid = document.querySelector("#scanner-grid");
+const bodyRows = Array.from(grid.tBodies[0].rows);
+const filters = Array.from(grid.querySelectorAll("[data-filter-column]"));
+const visibleCount = document.querySelector("#visible-count");
+function applyFilters() {{
+    let visible = 0;
+    bodyRows.forEach((row) => {{
+        const matches = filters.every((filter) => {{
+            const cell = row.cells[Number(filter.dataset.filterColumn)];
+            return !filter.value || (cell && cell.textContent.toLowerCase().includes(filter.value.toLowerCase()));
+        }});
+        row.hidden = !matches;
+        if (matches) visible += 1;
+    }});
+    visibleCount.textContent = `Showing ${{visible}} of ${{bodyRows.length}}`;
+}}
+filters.forEach((filter) => filter.addEventListener("input", applyFilters));
+document.querySelector("#clear-filters").addEventListener("click", () => {{
+    filters.forEach((filter) => {{ filter.value = ""; }});
+    applyFilters();
+}});
+</script>
 </body></html>"""
     )
 
@@ -171,6 +232,7 @@ h3 {{ margin-top: 32px; }}
 def _chartink_row(row: dict) -> str:
     """Render one enriched Chartink result."""
     indicators = row.get("indicators", {})
+    close_vs_ema_10 = _percentage_difference(row.get("close"), indicators.get("ema_10"))
     indicator_keys = (
         "rsi", "weekly_rsi_14", "monthly_rsi_14", "ema_10", "ema_20",
         "ema_50", "ema_200", "macd_histogram",
@@ -193,8 +255,21 @@ def _chartink_row(row: dict) -> str:
         f"<td>{_display_value(row.get('volume'))}</td>"
         f"<td>{_display_value(row.get('sector'))}</td>"
         f"<td>{_display_value(row.get('industry'))}</td>"
+        f"<td>{_display_value(close_vs_ema_10)}</td>"
         f"{indicator_cells}</tr>"
     )
+
+
+def _percentage_difference(value: object, reference: object) -> str | None:
+    """Return percentage difference between a value and its reference."""
+    try:
+        numeric_value = float(value)
+        numeric_reference = float(reference)
+    except (TypeError, ValueError):
+        return None
+    if numeric_reference == 0:
+        return None
+    return f"{((numeric_value - numeric_reference) / numeric_reference) * 100:.2f}%"
 
 
 def _dropped_row(row: dict) -> str:
