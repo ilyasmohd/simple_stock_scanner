@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from kiteconnect import KiteConnect
 
+from daily_scan_insertion import get_scan_history
 from stock_indicators import get_stock_indicators
 from zerodha_session import (
     get_todays_access_token,
@@ -74,12 +75,18 @@ def chartink_scanner_dashboard() -> HTMLResponse:
     try:
         scanner = _load_chartink_scanner()
         rows = scanner.scan_chartink_symbols()
+        latest_scan, scan_statuses, dropped_rows = get_scan_history()
     except Exception as error:
         return HTMLResponse(
             f"<h3>Chartink scanner failed: {_display_value(error)}</h3>",
             status_code=500,
         )
-    return render_chartink_dashboard(rows)
+    status_by_symbol = {row["symbol"]: row for row in scan_statuses}
+    for row in rows:
+        status = status_by_symbol.get(row["symbol"], {})
+        row["scan_status"] = status.get("status")
+        row["current_streak"] = status.get("current_streak")
+    return render_chartink_dashboard(rows, latest_scan, dropped_rows)
 
 
 def render_holdings(holdings: list[dict]) -> HTMLResponse:
@@ -110,11 +117,22 @@ th:first-child, td:first-child {{ text-align: left; }}
     )
 
 
-def render_chartink_dashboard(rows: list[dict]) -> HTMLResponse:
+def render_chartink_dashboard(
+    rows: list[dict], latest_scan: str | None, dropped_rows: list[dict]
+) -> HTMLResponse:
     """Render enriched Chartink rows in a portfolio-style dashboard."""
     table_rows = "".join(_chartink_row(row) for row in rows)
     if not table_rows:
-        table_rows = "<tr><td colspan='15'>No Chartink symbols found.</td></tr>"
+        table_rows = "<tr><td colspan='17'>No Chartink symbols found.</td></tr>"
+    status_counts = {"NEW": 0, "CONTINUING": 0}
+    for row in rows:
+        status = row.get("scan_status")
+        if status in status_counts:
+            status_counts[status] += 1
+    dropped_table_rows = "".join(_dropped_row(row) for row in dropped_rows)
+    if not dropped_table_rows:
+        dropped_table_rows = "<tr><td colspan='5'>None since the previous scan.</td></tr>"
+    scan_label = latest_scan or "No database scan yet"
     return HTMLResponse(
         f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Chartink Scanner</title>
@@ -125,15 +143,27 @@ th, td {{ border: 1px solid #d7dee3; padding: 8px; text-align: right; }}
 th {{ background: #387ed1; color: white; }}
 th:first-child, td:first-child, td:nth-child(2) {{ text-align: left; }}
 a {{ display: inline-block; margin-bottom: 16px; }}
+.summary {{ display: flex; gap: 24px; margin: 16px 0; }}
+.summary strong {{ font-size: 1.25rem; }}
+h3 {{ margin-top: 32px; }}
 </style></head><body>
 <h2>Chartink Scanner ({len(rows)})</h2>
+<p>Latest stored scan: <strong>{_display_value(scan_label)}</strong></p>
+<div class="summary">
+<div><strong>{status_counts['NEW']}</strong><br>New</div>
+<div><strong>{status_counts['CONTINUING']}</strong><br>Continuing</div>
+<div><strong>{len(dropped_rows)}</strong><br>Dropped</div>
+</div>
 <p><a href="/">Back to Portfolio</a></p>
 <table><thead><tr>
-<th>Symbol</th><th>Stock Name</th><th>Close</th><th>Change %</th><th>Volume</th>
+<th>Symbol</th><th>Stock Name</th><th>Status</th><th>Streak</th><th>Close</th><th>Change %</th><th>Volume</th>
 <th>Sector</th><th>Industry</th><th>RSI (14)</th><th>Weekly RSI (14)</th>
 <th>Monthly RSI (14)</th><th>EMA 10</th><th>EMA 20</th><th>EMA 50</th>
 <th>EMA 200</th><th>MACD Histogram</th>
 </tr></thead><tbody>{table_rows}</tbody></table>
+<h3>Dropped Since Previous Scan ({len(dropped_rows)})</h3>
+<table><thead><tr><th>Symbol</th><th>Stock Name</th><th>Close</th><th>Sector</th><th>Industry</th></tr></thead>
+<tbody>{dropped_table_rows}</tbody></table>
 </body></html>"""
     )
 
@@ -156,12 +186,27 @@ def _chartink_row(row: dict) -> str:
         "<tr>"
         f"<td>{_display_value(row.get('symbol'))}</td>"
         f"<td>{_display_value(row.get('stock_name'))}</td>"
+        f"<td>{_display_value(row.get('scan_status'))}</td>"
+        f"<td>{_display_value(row.get('current_streak'))}</td>"
         f"<td>{_display_value(row.get('close'))}</td>"
         f"<td>{_display_value(row.get('change'))}</td>"
         f"<td>{_display_value(row.get('volume'))}</td>"
         f"<td>{_display_value(row.get('sector'))}</td>"
         f"<td>{_display_value(row.get('industry'))}</td>"
         f"{indicator_cells}</tr>"
+    )
+
+
+def _dropped_row(row: dict) -> str:
+    """Render one symbol absent from the latest scan."""
+    return (
+        "<tr>"
+        f"<td>{_display_value(row.get('symbol'))}</td>"
+        f"<td>{_display_value(row.get('name'))}</td>"
+        f"<td>{_display_value(row.get('close'))}</td>"
+        f"<td>{_display_value(row.get('sector'))}</td>"
+        f"<td>{_display_value(row.get('industry'))}</td>"
+        "</tr>"
     )
 
 
