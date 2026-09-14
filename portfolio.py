@@ -9,11 +9,11 @@ import webbrowser
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from kiteconnect import KiteConnect
 
-from daily_scan_insertion import get_scan_history
+from daily_scan_insertion import CSV_FILE, get_scan_history, insert_daily_scan
 from stock_indicators import get_stock_indicators
 from zerodha_session import (
     get_todays_access_token,
@@ -89,6 +89,31 @@ def chartink_scanner_dashboard() -> HTMLResponse:
     return render_chartink_dashboard(rows, latest_scan, dropped_rows)
 
 
+@app.post("/upload-daily-scan")
+async def upload_daily_scan(file: UploadFile = File(...)) -> Response:
+    """Replace the scanner CSV, store the scan, and open the scanner page."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        return HTMLResponse("<h3>Please upload a .csv file.</h3>", status_code=400)
+
+    contents = await file.read()
+    if not contents.strip():
+        return HTMLResponse("<h3>The uploaded CSV is empty.</h3>", status_code=400)
+
+    CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary_file = CSV_FILE.with_name(f".{CSV_FILE.name}.uploading")
+    temporary_file.write_bytes(contents)
+    temporary_file.replace(CSV_FILE)
+    try:
+        insert_daily_scan()
+    except Exception as error:
+        return HTMLResponse(
+            f"<h3>Daily scan upload failed: {_display_value(error)}</h3>",
+            status_code=400,
+        )
+    return RedirectResponse("/chartink-scanner", status_code=303)
+
+
 def render_holdings(holdings: list[dict]) -> HTMLResponse:
     """Render holdings and technical indicators in the portfolio page."""
     rows = "".join(_holding_row(holding) for holding in holdings)
@@ -104,9 +129,15 @@ table {{ border-collapse: collapse; white-space: nowrap; }}
 th, td {{ border: 1px solid #d7dee3; padding: 8px; text-align: right; }}
 th {{ background: #387ed1; color: white; }}
 th:first-child, td:first-child {{ text-align: left; }}
+form {{ margin: 16px 0; }}
+button {{ padding: 7px 12px; border: 1px solid #9fb3c5; border-radius: 3px; background: white; cursor: pointer; }}
 </style></head><body>
 <h2>Your Holdings ({len(holdings)})</h2>
 <p><a href="/chartink-scanner">Chartink Scanner</a></p>
+<form action="/upload-daily-scan" method="post" enctype="multipart/form-data">
+<input type="file" name="file" accept=".csv,text/csv" required>
+<button type="submit">Upload CSV and open scanner</button>
+</form>
 <table><thead><tr>
 <th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
 <th>RSI (14)</th><th>Weekly RSI (14)</th><th>Monthly RSI (14)</th>
@@ -149,6 +180,8 @@ th {{ background: #387ed1; color: white; position: sticky; top: 0; z-index: 2; }
 thead tr.filter-row th {{ background: #eaf1f8; padding: 5px; top: 38px; z-index: 3; }}
 thead input, thead select {{ box-sizing: border-box; min-width: 92px; width: 100%; padding: 6px; border: 1px solid #b7c7d6; border-radius: 3px; background: white; color: #17202a; }}
 thead select {{ min-width: 120px; }}
+thead .range-filter {{ display: flex; gap: 4px; min-width: 150px; }}
+thead .range-filter input {{ min-width: 0; width: 50%; }}
 th:first-child, td:first-child, td:nth-child(2) {{ text-align: left; }}
 a {{ display: inline-block; margin-bottom: 16px; }}
 .summary {{ display: flex; gap: 24px; margin: 16px 0; }}
@@ -190,9 +223,9 @@ h3 {{ margin-top: 32px; }}
 <th><select data-filter-column="7"><option value="">All sectors</option>{sector_options}</select></th>
 <th><input type="search" data-filter-column="8" placeholder="Filter"></th>
 <th><input type="search" data-filter-column="9" placeholder="Filter"></th>
-<th><input type="search" data-filter-column="10" placeholder="Filter"></th>
-<th><input type="search" data-filter-column="11" placeholder="Filter"></th>
-<th><input type="search" data-filter-column="12" placeholder="Filter"></th>
+<th><div class="range-filter"><input type="number" step="any" data-filter-column="10" data-filter-bound="min" placeholder="From" aria-label="RSI minimum"><input type="number" step="any" data-filter-column="10" data-filter-bound="max" placeholder="To" aria-label="RSI maximum"></div></th>
+<th><div class="range-filter"><input type="number" step="any" data-filter-column="11" data-filter-bound="min" placeholder="From" aria-label="Weekly RSI minimum"><input type="number" step="any" data-filter-column="11" data-filter-bound="max" placeholder="To" aria-label="Weekly RSI maximum"></div></th>
+<th><div class="range-filter"><input type="number" step="any" data-filter-column="12" data-filter-bound="min" placeholder="From" aria-label="Monthly RSI minimum"><input type="number" step="any" data-filter-column="12" data-filter-bound="max" placeholder="To" aria-label="Monthly RSI maximum"></div></th>
 <th><input type="search" data-filter-column="13" placeholder="Filter"></th>
 <th><input type="search" data-filter-column="14" placeholder="Filter"></th>
 <th><input type="search" data-filter-column="15" placeholder="Filter"></th>
@@ -212,7 +245,16 @@ function applyFilters() {{
     bodyRows.forEach((row) => {{
         const matches = filters.every((filter) => {{
             const cell = row.cells[Number(filter.dataset.filterColumn)];
-            return !filter.value || (cell && cell.textContent.toLowerCase().includes(filter.value.toLowerCase()));
+            if (!filter.value) return true;
+            if (filter.dataset.filterBound) {{
+                const cellValue = Number.parseFloat(cell?.textContent ?? "");
+                const filterValue = Number.parseFloat(filter.value);
+                if (Number.isNaN(cellValue) || Number.isNaN(filterValue)) return false;
+                return filter.dataset.filterBound === "min"
+                    ? cellValue >= filterValue
+                    : cellValue <= filterValue;
+            }}
+            return cell && cell.textContent.toLowerCase().includes(filter.value.toLowerCase());
         }});
         row.hidden = !matches;
         if (matches) visible += 1;
