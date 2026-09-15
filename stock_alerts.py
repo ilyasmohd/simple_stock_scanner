@@ -1,30 +1,4 @@
-"""
-Stock alerts for NSE uptrend candidates.
-
-What this script implements:
-1. Downloads daily NSE price history from Yahoo Finance.
-2. Detects recent bullish EMA crossovers for EMA10 > EMA20 and EMA20 > EMA50.
-3. Checks whether the latest completed daily RSI(14) is above 50 and the
-   latest completed weekly RSI(14) is above 60, matching the confirmation
-   rules used by scan_nse_all_stocks.py.
-4. Alerts when daily RSI(14) crossed above 50 within the recent daily
-    lookback, with weekly RSI confirmation.
-5. Alerts when a confirmed EMA crossover happened within the last three
-   completed daily bars.
-6. Alerts when weekly RSI(14) crossed above 60 within the last three completed
-   weekly bars, with daily RSI confirmation.
-7. Prints alerts to the console and can optionally save them to a CSV file.
-
-The script is a one-shot scanner. Run it once after the market data is updated,
-or schedule it with Windows Task Scheduler for recurring alerts.
-
-Examples:
-    python stock_alerts.py --symbols SHYAMMETL CLEANMAX
-    python stock_alerts.py --symbols SHYAMMETL --lookback 3
-    python stock_alerts.py --file chartink_downloads/EQUITY_L.csv --output alerts.csv
-
-Requires: yfinance, pandas, numpy
-"""
+"""Scan NSE equity symbols and write the weekly-RSI stock alert workbook."""
 
 from __future__ import annotations
 
@@ -32,37 +6,20 @@ import argparse
 import csv
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from scan_nse_all_stocks import calculate_rsi
-
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_SYMBOLS = ["SHYAMMETL", "CLEANMAX"]
-HISTORY_PERIOD = "2y"
+INPUT_FILE = PROJECT_ROOT / "chartink_downloads" / "EQUITY_L.csv"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "daily_nse_scans"
+HISTORY_PERIOD = "5y"
 RSI_PERIOD = 14
-DAILY_RSI_MIN = 50.0
-WEEKLY_RSI_MIN = 60.0
-EMA_PAIRS = (
-    ("EMA10", "EMA20", "EMA10>EMA20"),
-    ("EMA20", "EMA50", "EMA20>EMA50"),
-)
-
-
-@dataclass
-class Alert:
-    symbol: str
-    alert_type: str
-    signal_date: str
-    bars_ago: int
-    close: float
-    daily_rsi_14: float
-    weekly_rsi_14: float
-    crossover_type: str = ""
+WEEKLY_RSI_MIN = 59.0
+MAX_WORKERS = 1
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -75,240 +32,207 @@ def normalize_symbol(symbol: str) -> str:
     return normalized
 
 
-def fetch_completed_daily_close(symbol: str, period: str) -> pd.Series | None:
-    """Download daily closes and remove today's possibly incomplete candle."""
-    yahoo_symbol = f"{normalize_symbol(symbol)}.NS"
+def calculate_rsi(series: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
+    """Calculate Wilder RSI, matching the existing scanner implementation."""
+    if period <= 0:
+        raise ValueError("RSI period must be greater than 0")
+
+    values = pd.to_numeric(series, errors="coerce")
+    delta = values.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    average_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    average_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+    if len(values) > period:
+        average_gain.iloc[period] = gain.iloc[1 : period + 1].mean()
+        average_loss.iloc[period] = loss.iloc[1 : period + 1].mean()
+        for index in range(period + 1, len(values)):
+            average_gain.iloc[index] = (
+                average_gain.iloc[index - 1] * (period - 1) + gain.iloc[index]
+            ) / period
+            average_loss.iloc[index] = (
+                average_loss.iloc[index - 1] * (period - 1) + loss.iloc[index]
+            ) / period
+
+    relative_strength = average_gain / average_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + relative_strength))
+    positive_only = average_loss.eq(0) & average_gain.gt(0)
+    return rsi.mask(positive_only, 100).fillna(50)
+
+
+def calculate_macd_histogram(close: pd.Series) -> pd.Series:
+    """Calculate the standard 12/26/9 MACD histogram."""
+    fast = close.ewm(span=12, adjust=False).mean()
+    slow = close.ewm(span=26, adjust=False).mean()
+    macd = fast - slow
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return macd - signal
+
+
+def completed_period_close(daily_close: pd.Series, rule: str) -> pd.Series:
+    """Resample closes and omit a period that has not completed yet."""
+    period_close = daily_close.resample(rule).last().dropna()
+    if period_close.empty:
+        return period_close
+    latest_daily_date = daily_close.index[-1].normalize()
+    return period_close[period_close.index.normalize() <= latest_daily_date]
+
+
+def format_values(values: pd.Series, count: int) -> str:
+    """Format the newest values first for one compact Excel cell."""
+    return ", ".join(f"{float(value):.2f}" for value in values.iloc[-count:].iloc[::-1])
+
+
+def load_symbol_rows(path: Path) -> list[dict[str, str]]:
+    """Load only EQ-series symbols and names from the NSE equity master."""
+    with path.open(newline="", encoding="utf-8-sig") as csv_file:
+        reader = csv.DictReader(csv_file, skipinitialspace=True)
+        required = {"SYMBOL", "NAME OF COMPANY", "SERIES"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"EQUITY_L.csv is missing columns: {', '.join(sorted(missing))}")
+        return [
+            {
+                "symbol": normalize_symbol(row["SYMBOL"]),
+                "name": (row["NAME OF COMPANY"] or "").strip(),
+            }
+            for row in reader
+            if (row.get("SERIES") or "").strip().upper() == "EQ"
+            and (row.get("SYMBOL") or "").strip()
+        ]
+
+
+def fetch_history(symbol: str, period: str) -> pd.DataFrame | None:
+    """Download completed daily OHLCV candles for one NSE symbol."""
     try:
-        history = yf.Ticker(yahoo_symbol).history(
-            period=period,
-            interval="1d",
-            auto_adjust=False,
+        history = yf.Ticker(f"{normalize_symbol(symbol)}.NS").history(
+            period=period, interval="1d", auto_adjust=False
         )
     except Exception as error:
         print(f"[WARN] {symbol}: download failed ({error})", file=sys.stderr)
         return None
 
-    if history.empty or "Close" not in history:
-        print(f"[WARN] {symbol}: no closing history", file=sys.stderr)
+    required = {"Open", "Close", "Volume"}
+    if history.empty or not required.issubset(history.columns):
+        print(f"[WARN] {symbol}: no OHLCV history", file=sys.stderr)
         return None
-
-    close = pd.to_numeric(history["Close"], errors="coerce").dropna()
-    if close.empty:
+    history = history.dropna(subset=list(required)).copy()
+    if history.empty:
         return None
-
-    if close.index.tz is None:
+    if history.index.tz is None:
         today = pd.Timestamp.now().normalize()
     else:
-        today = pd.Timestamp.now(tz=close.index.tz).normalize()
-    close = close[close.index.normalize() < today]
-    return close if not close.empty else None
+        today = pd.Timestamp.now(tz=history.index.tz).normalize()
+    return history[history.index.normalize() < today]
 
 
-def add_emas(close: pd.Series) -> pd.DataFrame:
-    """Calculate the EMA columns used by the crossover alerts."""
-    return pd.DataFrame(
-        {
-            "Close": close,
-            "EMA10": close.ewm(span=10, adjust=False).mean(),
-            "EMA20": close.ewm(span=20, adjust=False).mean(),
-            "EMA50": close.ewm(span=50, adjust=False).mean(),
-        }
-    )
+def scan_symbol(symbol_row: dict[str, str], period: str) -> dict[str, object] | None:
+    """Calculate one output row when the latest weekly RSI is above 59."""
+    data = fetch_history(symbol_row["symbol"], period)
+    if data is None or len(data) < 220:
+        return None
+
+    close = pd.to_numeric(data["Close"], errors="coerce")
+    daily_rsi = calculate_rsi(close)
+    weekly_close = completed_period_close(close, "W-FRI")
+    monthly_close = completed_period_close(close, "ME")
+    if len(weekly_close) < RSI_PERIOD + 6 or len(monthly_close) < RSI_PERIOD + 6:
+        return None
+
+    weekly_rsi = calculate_rsi(weekly_close)
+    monthly_rsi = calculate_rsi(monthly_close)
+    if float(weekly_rsi.iloc[-1]) <= WEEKLY_RSI_MIN:
+        return None
+
+    ema10 = close.ewm(span=10, adjust=False).mean()
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    macd_histogram = calculate_macd_histogram(close)
+    latest_close = float(close.iloc[-1])
+    latest_ema10 = float(ema10.iloc[-1])
+
+    return {
+        "symbol": f"{symbol_row['symbol']},",
+        "name": symbol_row["name"],
+        "day change (%)": round(float(close.pct_change().iloc[-1] * 100), 2),
+        "past 3 days return (%)": round((latest_close / float(close.iloc[-4]) - 1) * 100, 2),
+        "past 1 week return (%)": round((latest_close / float(close.iloc[-6]) - 1) * 100, 2),
+        "past 2 weeks return (%)": round((latest_close / float(close.iloc[-11]) - 1) * 100, 2),
+        "daily rsi": round(float(daily_rsi.iloc[-1]), 2),
+        "daily rsi (past 5 values)": format_values(daily_rsi.iloc[:-1], 5),
+        "weekly rsi": round(float(weekly_rsi.iloc[-1]), 2),
+        "weekly rsi (past 5 values)": format_values(weekly_rsi.iloc[:-1], 5),
+        "monthly rsi": round(float(monthly_rsi.iloc[-1]), 2),
+        "monthly rsi (past 5 values)": format_values(monthly_rsi.iloc[:-1], 5),
+        "day volume": int(data["Volume"].iloc[-1]),
+        "volume (today and past 4 days)": format_values(data["Volume"], 5),
+        "volume (past 5 values)": format_values(data["Volume"].iloc[:-1], 5),
+        "macd histogram (current and past 4 values)": format_values(macd_histogram, 5),
+        "close vs ema 10 (%)": round((latest_close / latest_ema10 - 1) * 100, 2),
+        "ema 10": round(float(ema10.iloc[-1]), 2),
+        "ema20": round(float(ema20.iloc[-1]), 2),
+        "ema 50": round(float(ema50.iloc[-1]), 2),
+        "ema 200": round(float(ema200.iloc[-1]), 2),
+    }
 
 
-def completed_weekly_close(daily_close: pd.Series) -> pd.Series:
-    """Resample daily closes and exclude the current incomplete week."""
-    weekly = daily_close.resample("W-FRI").last().dropna()
-    if weekly.empty:
-        return weekly
-    latest_daily_date = daily_close.index[-1].normalize()
-    return weekly[weekly.index.normalize() <= latest_daily_date]
-
-
-def recent_cross_indices(
-    fast: pd.Series,
-    slow: pd.Series,
-    lookback: int,
-) -> list[tuple[int, int]]:
-    """Return (index, bars_ago) for upward crosses in the recent bars."""
-    if lookback <= 0:
-        raise ValueError("Lookback must be greater than 0")
-
-    crosses: list[tuple[int, int]] = []
-    start = max(1, len(fast) - lookback)
-    for index in range(start, len(fast)):
-        crossed_up = fast.iloc[index - 1] <= slow.iloc[index - 1] and fast.iloc[index] > slow.iloc[index]
-        if crossed_up:
-            crosses.append((index, len(fast) - 1 - index))
-    return crosses
-
-
-def scan_symbol(
-    symbol: str,
-    period: str,
-    daily_lookback: int,
-    weekly_lookback: int,
-) -> list[Alert]:
-    """Return confirmed EMA and RSI alerts for one symbol."""
-    symbol = normalize_symbol(symbol)
-    daily_close = fetch_completed_daily_close(symbol, period)
-    if daily_close is None or len(daily_close) < 60:
-        return []
-
-    daily = add_emas(daily_close)
-    daily_rsi = calculate_rsi(daily_close, RSI_PERIOD)
-    weekly_close = completed_weekly_close(daily_close)
-    if len(weekly_close) <= RSI_PERIOD:
-        return []
-    weekly_rsi = calculate_rsi(weekly_close, RSI_PERIOD)
-
-    latest_daily_rsi = float(daily_rsi.iloc[-1])
-    latest_weekly_rsi = float(weekly_rsi.iloc[-1])
-    if latest_daily_rsi <= DAILY_RSI_MIN or latest_weekly_rsi <= WEEKLY_RSI_MIN:
-        return []
-
-    alerts: list[Alert] = []
-    daily_rsi_crosses = recent_cross_indices(
-        daily_rsi,
-        pd.Series(DAILY_RSI_MIN, index=daily_rsi.index),
-        daily_lookback,
-    )
-    for index, bars_ago in daily_rsi_crosses:
-        alerts.append(
-            Alert(
-                symbol=symbol,
-                alert_type="CONFIRMED_DAILY_RSI_CROSS_ABOVE_50",
-                signal_date=daily_rsi.index[index].date().isoformat(),
-                bars_ago=bars_ago,
-                close=round(float(daily_close.iloc[index]), 2),
-                daily_rsi_14=round(latest_daily_rsi, 2),
-                weekly_rsi_14=round(latest_weekly_rsi, 2),
-            )
-        )
-
-    for fast_name, slow_name, crossover_type in EMA_PAIRS:
-        fast = daily[fast_name]
-        slow = daily[slow_name]
-        for index, bars_ago in recent_cross_indices(fast, slow, daily_lookback):
-            alerts.append(
-                Alert(
-                    symbol=symbol,
-                    alert_type="CONFIRMED_DAILY_GOLDEN_CROSS",
-                    signal_date=daily.index[index].date().isoformat(),
-                    bars_ago=bars_ago,
-                    close=round(float(daily["Close"].iloc[index]), 2),
-                    daily_rsi_14=round(latest_daily_rsi, 2),
-                    weekly_rsi_14=round(latest_weekly_rsi, 2),
-                    crossover_type=crossover_type,
-                )
-            )
-
-    weekly_crosses = recent_cross_indices(
-        pd.Series(weekly_rsi.values, index=weekly_rsi.index),
-        pd.Series(WEEKLY_RSI_MIN, index=weekly_rsi.index),
-        weekly_lookback,
-    )
-    for index, bars_ago in weekly_crosses:
-        alerts.append(
-            Alert(
-                symbol=symbol,
-                alert_type="CONFIRMED_WEEKLY_RSI_CROSS_ABOVE_60",
-                signal_date=weekly_rsi.index[index].date().isoformat(),
-                bars_ago=bars_ago,
-                close=round(float(daily_close.iloc[-1]), 2),
-                daily_rsi_14=round(latest_daily_rsi, 2),
-                weekly_rsi_14=round(latest_weekly_rsi, 2),
-            )
-        )
-    return alerts
-
-
-def load_symbols(path: str) -> list[str]:
-    """Load symbols from either SYMBOL or symbol, or the first CSV column."""
-    with Path(path).open(newline="", encoding="utf-8-sig") as csv_file:
-        reader = csv.DictReader(csv_file)
-        fields = reader.fieldnames or []
-        column = "SYMBOL" if "SYMBOL" in fields else "symbol" if "symbol" in fields else fields[0]
-        return [normalize_symbol(row[column]) for row in reader if row.get(column, "").strip()]
-
-
-def run_alert_scan(
-    symbols: list[str],
-    period: str,
-    daily_lookback: int,
-    weekly_lookback: int,
-    workers: int,
-) -> list[Alert]:
-    """Scan symbols concurrently and print every alert as it is found."""
-    alerts: list[Alert] = []
+def scan_universe(symbol_rows: list[dict[str, str]], period: str, workers: int) -> list[dict[str, object]]:
+    """Scan the EQ universe and return weekly-RSI matches."""
+    rows: list[dict[str, object]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(
-                scan_symbol,
-                symbol,
-                period,
-                daily_lookback,
-                weekly_lookback,
-            ): symbol
-            for symbol in symbols
+            pool.submit(scan_symbol, symbol_row, period): symbol_row["symbol"]
+            for symbol_row in symbol_rows
         }
         for future in as_completed(futures):
             symbol = futures[future]
             try:
-                symbol_alerts = future.result()
+                row = future.result()
             except Exception as error:
                 print(f"[ERROR] {symbol}: {error}", file=sys.stderr)
                 continue
-            alerts.extend(symbol_alerts)
-            for alert in symbol_alerts:
-                print(
-                    f"[ALERT] {alert.symbol} {alert.alert_type} "
-                    f"on {alert.signal_date} ({alert.bars_ago} bars ago) | "
-                    f"daily RSI={alert.daily_rsi_14:.2f}, "
-                    f"weekly RSI={alert.weekly_rsi_14:.2f}"
-                    + (f", {alert.crossover_type}" if alert.crossover_type else "")
-                )
-    return sorted(alerts, key=lambda alert: (alert.symbol, alert.signal_date, alert.alert_type))
+            if row is not None:
+                rows.append(row)
+            print(f"[CHECKED] {symbol}")
+    return sorted(rows, key=lambda row: str(row["symbol"]))
+
+
+def write_report(rows: list[dict[str, object]], output_dir: Path) -> Path:
+    """Write the single-sheet dated Excel report."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"stock_alerts-{pd.Timestamp.now().date().isoformat()}.xlsx"
+    columns = [
+        "symbol", "name", "day change (%)", "past 3 days return (%)",
+        "past 1 week return (%)", "past 2 weeks return (%)", "daily rsi",
+        "daily rsi (past 5 values)",
+        "weekly rsi", "weekly rsi (past 5 values)", "monthly rsi",
+        "monthly rsi (past 5 values)", "day volume",
+        "volume (today and past 4 days)", "volume (past 5 values)",
+        "macd histogram (current and past 4 values)",
+        "close vs ema 10 (%)", "ema 10", "ema20", "ema 50", "ema 200",
+    ]
+    pd.DataFrame(rows, columns=columns).to_excel(output_path, index=False, sheet_name="Stock Alerts")
+    return output_path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NSE EMA and RSI stock alerts")
-    parser.add_argument("--symbols", nargs="+", help="NSE symbols, e.g. SHYAMMETL CLEANMAX")
-    parser.add_argument("--file", help="CSV containing a SYMBOL or symbol column")
-    parser.add_argument("--period", default=HISTORY_PERIOD, help="Yahoo history period, default: 2y")
-    parser.add_argument("--lookback", type=int, default=3, help="Recent completed daily bars, default: 3")
-    parser.add_argument("--weekly-lookback", type=int, default=3, help="Recent completed weekly bars, default: 3")
-    parser.add_argument("--workers", type=int, default=6, help="Parallel downloads, default: 6")
-    parser.add_argument("--output", help="Optional CSV path for the alerts")
+    parser = argparse.ArgumentParser(description="NSE weekly RSI stock alert scanner")
+    parser.add_argument("--period", default=HISTORY_PERIOD, help="Yahoo history period, default: 5y")
+    parser.add_argument("--workers", type=int, default=MAX_WORKERS, help="Download workers")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Excel output directory")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.symbols:
-        symbols = [normalize_symbol(symbol) for symbol in args.symbols]
-    elif args.file:
-        symbols = load_symbols(args.file)
-    else:
-        symbols = DEFAULT_SYMBOLS
-        print(f"No symbols supplied; using {', '.join(symbols)}")
-
-    alerts = run_alert_scan(
-        symbols,
-        args.period,
-        args.lookback,
-        args.weekly_lookback,
-        args.workers,
-    )
-    if not alerts:
-        print("No confirmed alerts found.")
-        return
-
-    if args.output:
-        pd.DataFrame([asdict(alert) for alert in alerts]).to_csv(args.output, index=False)
-        print(f"Saved {len(alerts)} alert(s) to {args.output}")
-    else:
-        print(f"Found {len(alerts)} confirmed alert(s).")
+    symbol_rows = load_symbol_rows(INPUT_FILE)
+    workers = max(1, args.workers)
+    print(f"Scanning {len(symbol_rows)} EQ symbols from {INPUT_FILE}")
+    rows = scan_universe(symbol_rows, args.period, workers)
+    output_path = write_report(rows, Path(args.output_dir))
+    print(f"Saved {len(rows)} matching symbols to {output_path}")
 
 
 if __name__ == "__main__":

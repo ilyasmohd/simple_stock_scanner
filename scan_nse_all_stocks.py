@@ -17,7 +17,7 @@ OUTPUT_FILE = PROJECT_ROOT / "chartink_downloads" / "nse_rsi_scan.csv"
 RSI_PERIOD = 14
 WEEKLY_RSI_MIN = 59.0
 DAILY_RSI_MIN = 50.0
-DAILY_RSI_MAX = 80.0
+DAILY_RSI_MAX = 100.0
 HISTORY_PERIOD = "5y"
 
 

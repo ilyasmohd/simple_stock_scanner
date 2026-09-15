@@ -16,6 +16,12 @@ listens on port 8765, so Kite would not reach the callback handler.
 .\venv-yfinz\Scripts\python.exe -m pip install fastapi uvicorn kiteconnect
 ```
 
+CSV uploads from the portfolio page also require `python-multipart`:
+
+```powershell
+.\venv-yfinz\Scripts\python.exe -m pip install python-multipart
+```
+
 The portfolio indicator page also uses Yahoo Finance through `yfinance`:
 
 ```powershell
