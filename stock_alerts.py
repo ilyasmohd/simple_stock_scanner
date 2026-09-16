@@ -62,7 +62,7 @@ def calculate_rsi(series: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
 
 
 def calculate_macd_histogram(close: pd.Series) -> pd.Series:
-    """Calculate the standard 12/26/9 MACD histogram."""
+    """Calculate TradingView's standard 12/26/9 EMA MACD histogram."""
     fast = close.ewm(span=12, adjust=False).mean()
     slow = close.ewm(span=26, adjust=False).mean()
     macd = fast - slow
@@ -71,17 +71,13 @@ def calculate_macd_histogram(close: pd.Series) -> pd.Series:
 
 
 def completed_period_close(daily_close: pd.Series, rule: str) -> pd.Series:
-    """Resample closes and omit a period that has not completed yet."""
-    period_close = daily_close.resample(rule).last().dropna()
-    if period_close.empty:
-        return period_close
-    latest_daily_date = daily_close.index[-1].normalize()
-    return period_close[period_close.index.normalize() <= latest_daily_date]
+    """Resample closes, including the currently forming period."""
+    return daily_close.resample(rule).last().dropna()
 
 
 def format_values(values: pd.Series, count: int) -> str:
-    """Format the newest values first for one compact Excel cell."""
-    return ", ".join(f"{float(value):.2f}" for value in values.iloc[-count:].iloc[::-1])
+    """Format the requested values oldest first and newest last."""
+    return ", ".join(f"{float(value):.2f}" for value in values.iloc[-count:])
 
 
 def load_symbol_rows(path: Path) -> list[dict[str, str]]:
@@ -104,7 +100,7 @@ def load_symbol_rows(path: Path) -> list[dict[str, str]]:
 
 
 def fetch_history(symbol: str, period: str) -> pd.DataFrame | None:
-    """Download completed daily OHLCV candles for one NSE symbol."""
+    """Download daily OHLCV candles, including today's candle when available."""
     try:
         history = yf.Ticker(f"{normalize_symbol(symbol)}.NS").history(
             period=period, interval="1d", auto_adjust=False
@@ -120,17 +116,21 @@ def fetch_history(symbol: str, period: str) -> pd.DataFrame | None:
     history = history.dropna(subset=list(required)).copy()
     if history.empty:
         return None
-    if history.index.tz is None:
-        today = pd.Timestamp.now().normalize()
-    else:
-        today = pd.Timestamp.now(tz=history.index.tz).normalize()
-    return history[history.index.normalize() < today]
+    return history
 
 
 def scan_symbol(symbol_row: dict[str, str], period: str) -> dict[str, object] | None:
     """Calculate one output row when the latest weekly RSI is above 59."""
     data = fetch_history(symbol_row["symbol"], period)
-    if data is None or len(data) < 220:
+    if data is None:
+        return None
+
+    if data.index.tz is None:
+        today = pd.Timestamp.now().normalize()
+    else:
+        today = pd.Timestamp.now(tz=data.index.tz).normalize()
+    completed_data = data[data.index.normalize() < today]
+    if len(completed_data) < 220:
         return None
 
     close = pd.to_numeric(data["Close"], errors="coerce")
@@ -145,36 +145,25 @@ def scan_symbol(symbol_row: dict[str, str], period: str) -> dict[str, object] | 
     if float(weekly_rsi.iloc[-1]) <= WEEKLY_RSI_MIN:
         return None
 
-    ema10 = close.ewm(span=10, adjust=False).mean()
-    ema20 = close.ewm(span=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
-    ema200 = close.ewm(span=200, adjust=False).mean()
     macd_histogram = calculate_macd_histogram(close)
     latest_close = float(close.iloc[-1])
-    latest_ema10 = float(ema10.iloc[-1])
 
     return {
         "symbol": f"{symbol_row['symbol']},",
         "name": symbol_row["name"],
-        "day change (%)": round(float(close.pct_change().iloc[-1] * 100), 2),
+        "past 12 days return (%)": round((latest_close / float(close.iloc[-13]) - 1) * 100, 2),
+        "past 10 days return (%)": round((latest_close / float(close.iloc[-11]) - 1) * 100, 2),
+        "past 7 days return (%)": round((latest_close / float(close.iloc[-8]) - 1) * 100, 2),
+        "past 5 days return (%)": round((latest_close / float(close.iloc[-6]) - 1) * 100, 2),
         "past 3 days return (%)": round((latest_close / float(close.iloc[-4]) - 1) * 100, 2),
-        "past 1 week return (%)": round((latest_close / float(close.iloc[-6]) - 1) * 100, 2),
-        "past 2 weeks return (%)": round((latest_close / float(close.iloc[-11]) - 1) * 100, 2),
+        "day change (%)": round(float(close.pct_change().iloc[-1] * 100), 2),
+        "macd histogram (current and past 7 values)": format_values(macd_histogram, 8),
         "daily rsi": round(float(daily_rsi.iloc[-1]), 2),
-        "daily rsi (past 5 values)": format_values(daily_rsi.iloc[:-1], 5),
+        "daily rsi (past 7 values)": format_values(daily_rsi, 8),
         "weekly rsi": round(float(weekly_rsi.iloc[-1]), 2),
         "weekly rsi (past 5 values)": format_values(weekly_rsi.iloc[:-1], 5),
         "monthly rsi": round(float(monthly_rsi.iloc[-1]), 2),
         "monthly rsi (past 5 values)": format_values(monthly_rsi.iloc[:-1], 5),
-        "day volume": int(data["Volume"].iloc[-1]),
-        "volume (today and past 4 days)": format_values(data["Volume"], 5),
-        "volume (past 5 values)": format_values(data["Volume"].iloc[:-1], 5),
-        "macd histogram (current and past 4 values)": format_values(macd_histogram, 5),
-        "close vs ema 10 (%)": round((latest_close / latest_ema10 - 1) * 100, 2),
-        "ema 10": round(float(ema10.iloc[-1]), 2),
-        "ema20": round(float(ema20.iloc[-1]), 2),
-        "ema 50": round(float(ema50.iloc[-1]), 2),
-        "ema 200": round(float(ema200.iloc[-1]), 2),
     }
 
 
@@ -204,14 +193,11 @@ def write_report(rows: list[dict[str, object]], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"stock_alerts-{pd.Timestamp.now().date().isoformat()}.xlsx"
     columns = [
-        "symbol", "name", "day change (%)", "past 3 days return (%)",
-        "past 1 week return (%)", "past 2 weeks return (%)", "daily rsi",
-        "daily rsi (past 5 values)",
-        "weekly rsi", "weekly rsi (past 5 values)", "monthly rsi",
-        "monthly rsi (past 5 values)", "day volume",
-        "volume (today and past 4 days)", "volume (past 5 values)",
-        "macd histogram (current and past 4 values)",
-        "close vs ema 10 (%)", "ema 10", "ema20", "ema 50", "ema 200",
+        "symbol", "name", "past 12 days return (%)", "past 10 days return (%)",
+        "past 7 days return (%)", "past 5 days return (%)", "past 3 days return (%)",
+        "day change (%)", "macd histogram (current and past 7 values)",
+        "daily rsi", "daily rsi (past 7 values)", "weekly rsi",
+        "weekly rsi (past 5 values)", "monthly rsi", "monthly rsi (past 5 values)",
     ]
     pd.DataFrame(rows, columns=columns).to_excel(output_path, index=False, sheet_name="Stock Alerts")
     return output_path
