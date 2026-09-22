@@ -70,6 +70,12 @@ def calculate_macd_histogram(close: pd.Series) -> pd.Series:
     return macd - signal
 
 
+def calculate_ema_slope(close: pd.Series, period: int) -> float:
+    """Return the latest one-day EMA change in price units."""
+    ema = close.ewm(span=period, adjust=False).mean()
+    return round(float(ema.iloc[-1] - ema.iloc[-2]), 4)
+
+
 def completed_period_close(daily_close: pd.Series, rule: str) -> pd.Series:
     """Resample closes, including the currently forming period."""
     return daily_close.resample(rule).last().dropna()
@@ -146,6 +152,9 @@ def scan_symbol(symbol_row: dict[str, str], period: str) -> dict[str, object] | 
         return None
 
     macd_histogram = calculate_macd_histogram(close)
+    ema_10_slope = calculate_ema_slope(close, 10)
+    ema_20_slope = calculate_ema_slope(close, 20)
+    ema_50_slope = calculate_ema_slope(close, 50)
     latest_close = float(close.iloc[-1])
 
     return {
@@ -157,6 +166,9 @@ def scan_symbol(symbol_row: dict[str, str], period: str) -> dict[str, object] | 
         "past 5 days return (%)": round((latest_close / float(close.iloc[-6]) - 1) * 100, 2),
         "past 3 days return (%)": round((latest_close / float(close.iloc[-4]) - 1) * 100, 2),
         "day change (%)": round(float(close.pct_change().iloc[-1] * 100), 2),
+        "ema 10 slope (daily)": ema_10_slope,
+        "ema 20 slope (daily)": ema_20_slope,
+        "ema 50 slope (daily)": ema_50_slope,
         "macd histogram (current and past 7 values)": format_values(macd_histogram, 8),
         "daily rsi": round(float(daily_rsi.iloc[-1]), 2),
         "daily rsi (past 7 values)": format_values(daily_rsi, 8),
@@ -185,7 +197,7 @@ def scan_universe(symbol_rows: list[dict[str, str]], period: str, workers: int) 
             if row is not None:
                 rows.append(row)
             print(f"[CHECKED] {symbol}")
-    return sorted(rows, key=lambda row: str(row["symbol"]))
+    return sorted(rows, key=lambda row: float(row["ema 10 slope (daily)"]), reverse=True)
 
 
 def write_report(rows: list[dict[str, object]], output_dir: Path) -> Path:
@@ -195,7 +207,8 @@ def write_report(rows: list[dict[str, object]], output_dir: Path) -> Path:
     columns = [
         "symbol", "name", "past 12 days return (%)", "past 10 days return (%)",
         "past 7 days return (%)", "past 5 days return (%)", "past 3 days return (%)",
-        "day change (%)", "macd histogram (current and past 7 values)",
+        "day change (%)", "ema 10 slope (daily)", "ema 20 slope (daily)",
+        "ema 50 slope (daily)", "macd histogram (current and past 7 values)",
         "daily rsi", "daily rsi (past 7 values)", "weekly rsi",
         "weekly rsi (past 5 values)", "monthly rsi", "monthly rsi (past 5 values)",
     ]
