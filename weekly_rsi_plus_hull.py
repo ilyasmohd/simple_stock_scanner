@@ -141,46 +141,38 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
     if df.empty:
         df = pd.DataFrame(columns=["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50", "Daily RSI(14)"])
 
-    df = df.sort_values("Weekly RSI(14)", ascending=False).reset_index(drop=True)
+    headers = ["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50", "Daily RSI(14)"]
+    sheet_ranges = [
+        ("Weekly RSI Above 65", df[df["Weekly RSI(14)"] > 65]),
+        ("Weekly RSI 55-65", df[(df["Weekly RSI(14)"] >= 55) & (df["Weekly RSI(14)"] <= 65)]),
+        ("Weekly RSI 50-55", df[(df["Weekly RSI(14)"] > 50) & (df["Weekly RSI(14)"] < 55)]),
+    ]
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Weekly Green RSI"
+    for sheet_index, (sheet_name, sheet_df) in enumerate(sheet_ranges):
+        ws = wb.active if sheet_index == 0 else wb.create_sheet()
+        ws.title = sheet_name
+        ws.append(headers)
 
-    headers = ["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50", "Daily RSI(14)"]
-    ws.append(headers)
+        for col_idx, _ in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = Font(name="Arial", bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    for col_idx, _ in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.font = Font(name="Arial", bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="1F4E78")
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet_df = sheet_df.sort_values("Weekly RSI(14)", ascending=False)
+        for _, row in sheet_df.iterrows():
+            ws.append([row[header] for header in headers])
 
-    for row_idx, row in df.iterrows():
-        ws.append([
-            row["Symbol"],
-            row["Name of Company"],
-            row["Trend"],
-            row["Weekly RSI(14)"],
-            row["Weekly Close"],
-            row["Weekly EMA50"],
-            row["Daily RSI(14)"],
-        ])
+        for row_idx in range(2, ws.max_row + 1):
+            for col_idx in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col_idx).font = Font(name="Arial")
 
-    for r in range(2, ws.max_row + 1):
-        ws.cell(row=r, column=1).font = Font(name="Arial")
-        ws.cell(row=r, column=2).font = Font(name="Arial")
-        ws.cell(row=r, column=3).font = Font(name="Arial")
-        ws.cell(row=r, column=4).font = Font(name="Arial")
-        ws.cell(row=r, column=5).font = Font(name="Arial")
-        ws.cell(row=r, column=6).font = Font(name="Arial")
-        ws.cell(row=r, column=7).font = Font(name="Arial")
+        for col_idx, width in enumerate([12, 35, 10, 15, 12, 12, 12], start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    for col_idx, width in enumerate([12, 35, 10, 15, 12, 12, 12], start=1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
-
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:G{ws.max_row}"
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:G{ws.max_row}"
 
     wb.save(output_path)
 
