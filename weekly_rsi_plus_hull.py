@@ -55,6 +55,27 @@ def fetch_weekly(symbol: str, period: str = "5y") -> pd.DataFrame | None:
     return df
 
 
+def fetch_daily(symbol: str, period: str = "6mo") -> pd.DataFrame | None:
+    ticker = symbol if symbol.upper().endswith(".NS") else f"{symbol.upper()}.NS"
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+        )
+    except Exception:
+        return None
+
+    if df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.index.name = "Date"
+    return df
+
+
 def load_master_symbols(input_path: Path) -> pd.DataFrame:
     df = pd.read_csv(input_path)
     required = {"SYMBOL", "NAME OF COMPANY"}
@@ -77,30 +98,37 @@ def evaluate_symbol(symbol: str, company_name: str, period: str = "5y") -> dict 
         return None
 
     hull = hull_trend_strategy(df, HullConfig(length=24))
-    rsi = rsi_wilder(df["Close"], length=14)
-    ema50 = ema(df["Close"], 50)
+    weekly_rsi = rsi_wilder(df["Close"], length=14)
+    weekly_ema50 = ema(df["Close"], 50)
 
-    if len(hull) == 0 or len(rsi) == 0 or len(ema50) == 0:
+    if len(hull) == 0 or len(weekly_rsi) == 0 or len(weekly_ema50) == 0:
         return None
 
     trend = str(hull["trend"].iloc[-1]).strip().lower()
-    rsi_value = float(rsi.iloc[-1])
+    weekly_rsi_value = float(weekly_rsi.iloc[-1])
     close_value = float(df["Close"].iloc[-1])
-    ema50_value = float(ema50.iloc[-1])
+    ema50_value = float(weekly_ema50.iloc[-1])
 
-    if pd.isna(rsi_value) or pd.isna(ema50_value):
+    if pd.isna(weekly_rsi_value) or pd.isna(ema50_value):
         return None
+
+    daily_df = fetch_daily(symbol, period="6mo")
+    daily_rsi_value = None
+    if daily_df is not None and len(daily_df) >= 30:
+        daily_rsi = rsi_wilder(daily_df["Close"], length=14)
+        daily_rsi_value = float(daily_rsi.iloc[-1])
 
     is_above_ema50 = close_value > ema50_value
 
-    if trend == "green" and rsi_value > 50 and is_above_ema50:
+    if trend == "green" and weekly_rsi_value > 50 and is_above_ema50:
         return {
             "Symbol": symbol,
             "Name of Company": company_name,
             "Trend": "Green",
-            "Weekly RSI(14)": round(rsi_value, 2),
+            "Weekly RSI(14)": round(weekly_rsi_value, 2),
             "Weekly Close": round(close_value, 2),
             "Weekly EMA50": round(ema50_value, 2),
+            "Daily RSI(14)": round(daily_rsi_value, 2) if daily_rsi_value is not None else None,
         }
 
     return None
@@ -111,7 +139,7 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
 
     df = pd.DataFrame(rows)
     if df.empty:
-        df = pd.DataFrame(columns=["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50"])
+        df = pd.DataFrame(columns=["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50", "Daily RSI(14)"])
 
     df = df.sort_values("Weekly RSI(14)", ascending=False).reset_index(drop=True)
 
@@ -119,7 +147,7 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
     ws = wb.active
     ws.title = "Weekly Green RSI"
 
-    headers = ["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50"]
+    headers = ["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50", "Daily RSI(14)"]
     ws.append(headers)
 
     for col_idx, _ in enumerate(headers, start=1):
@@ -136,6 +164,7 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
             row["Weekly RSI(14)"],
             row["Weekly Close"],
             row["Weekly EMA50"],
+            row["Daily RSI(14)"],
         ])
 
     for r in range(2, ws.max_row + 1):
@@ -145,12 +174,13 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
         ws.cell(row=r, column=4).font = Font(name="Arial")
         ws.cell(row=r, column=5).font = Font(name="Arial")
         ws.cell(row=r, column=6).font = Font(name="Arial")
+        ws.cell(row=r, column=7).font = Font(name="Arial")
 
-    for col_idx, width in enumerate([12, 35, 10, 15, 12, 12], start=1):
+    for col_idx, width in enumerate([12, 35, 10, 15, 12, 12, 12], start=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:F{ws.max_row}"
+    ws.auto_filter.ref = f"A1:G{ws.max_row}"
 
     wb.save(output_path)
 
