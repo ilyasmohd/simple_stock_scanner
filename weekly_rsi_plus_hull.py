@@ -17,6 +17,10 @@ DEFAULT_INPUT = Path(__file__).resolve().parent / "masterdata_excels" / "EQUITY_
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "daily_nse_scans_alerts" / "weekly_green_rsi_above_50.xlsx"
 
 
+def ema(close: pd.Series, span: int) -> pd.Series:
+    return close.ewm(span=span, adjust=False).mean()
+
+
 def rsi_wilder(close: pd.Series, length: int = 14) -> pd.Series:
     """Wilder RSI (matching Chartink-style weekly RSI)."""
     delta = close.diff()
@@ -74,22 +78,29 @@ def evaluate_symbol(symbol: str, company_name: str, period: str = "5y") -> dict 
 
     hull = hull_trend_strategy(df, HullConfig(length=24))
     rsi = rsi_wilder(df["Close"], length=14)
+    ema50 = ema(df["Close"], 50)
 
-    if len(hull) == 0 or len(rsi) == 0:
+    if len(hull) == 0 or len(rsi) == 0 or len(ema50) == 0:
         return None
 
     trend = str(hull["trend"].iloc[-1]).strip().lower()
     rsi_value = float(rsi.iloc[-1])
+    close_value = float(df["Close"].iloc[-1])
+    ema50_value = float(ema50.iloc[-1])
 
-    if pd.isna(rsi_value):
+    if pd.isna(rsi_value) or pd.isna(ema50_value):
         return None
 
-    if trend == "green" and rsi_value > 50:
+    is_above_ema50 = close_value > ema50_value
+
+    if trend == "green" and rsi_value > 50 and is_above_ema50:
         return {
             "Symbol": symbol,
             "Name of Company": company_name,
             "Trend": "Green",
             "Weekly RSI(14)": round(rsi_value, 2),
+            "Weekly Close": round(close_value, 2),
+            "Weekly EMA50": round(ema50_value, 2),
         }
 
     return None
@@ -100,7 +111,7 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
 
     df = pd.DataFrame(rows)
     if df.empty:
-        df = pd.DataFrame(columns=["Symbol", "Name of Company", "Trend", "Weekly RSI(14)"])
+        df = pd.DataFrame(columns=["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50"])
 
     df = df.sort_values("Weekly RSI(14)", ascending=False).reset_index(drop=True)
 
@@ -108,7 +119,7 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
     ws = wb.active
     ws.title = "Weekly Green RSI"
 
-    headers = ["Symbol", "Name of Company", "Trend", "Weekly RSI(14)"]
+    headers = ["Symbol", "Name of Company", "Trend", "Weekly RSI(14)", "Weekly Close", "Weekly EMA50"]
     ws.append(headers)
 
     for col_idx, _ in enumerate(headers, start=1):
@@ -123,6 +134,8 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
             row["Name of Company"],
             row["Trend"],
             row["Weekly RSI(14)"],
+            row["Weekly Close"],
+            row["Weekly EMA50"],
         ])
 
     for r in range(2, ws.max_row + 1):
@@ -130,12 +143,14 @@ def build_output_excel(rows: list[dict], output_path: Path) -> None:
         ws.cell(row=r, column=2).font = Font(name="Arial")
         ws.cell(row=r, column=3).font = Font(name="Arial")
         ws.cell(row=r, column=4).font = Font(name="Arial")
+        ws.cell(row=r, column=5).font = Font(name="Arial")
+        ws.cell(row=r, column=6).font = Font(name="Arial")
 
-    for col_idx, width in enumerate([12, 35, 10, 15], start=1):
+    for col_idx, width in enumerate([12, 35, 10, 15, 12, 12], start=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:D{ws.max_row}"
+    ws.auto_filter.ref = f"A1:F{ws.max_row}"
 
     wb.save(output_path)
 
