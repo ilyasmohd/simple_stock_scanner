@@ -119,6 +119,7 @@ def evaluate_symbol(symbol: str, company_name: str, period: str = "5y") -> dict 
         daily_rsi_value = float(daily_rsi.iloc[-1])
 
     is_above_ema50 = close_value > ema50_value
+    print(f"  -> Trend={trend}, Weekly RSI={weekly_rsi_value:.2f}, Close={close_value:.2f}, EMA50={ema50_value:.2f}, Daily RSI={daily_rsi_value if daily_rsi_value is not None else 'N/A'}")
 
     if trend == "green" and weekly_rsi_value > 50 and is_above_ema50:
         return {
