@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 
 from hull_trend_strategy import HullConfig, hull_trend_strategy
 from scan_nse_all_stocks import calculate_macd, calculate_rsi
@@ -26,7 +28,14 @@ OUTPUT_COLUMNS = [
 	"Daily RSI(14)",
 	"Hull Trend",
 	"MACD Histogram",
+	"Volume Signal",
 ]
+VOLUME_SIGNAL_FILLS = {
+	"Blue": "D9EAF7",
+	"Green": "C6EFCE",
+	"Red": "FFC7CE",
+	"Grey (Noise)": "D9D9D9",
+}
 
 
 def load_master_symbols(input_path: Path) -> pd.DataFrame:
@@ -59,9 +68,42 @@ def fetch_daily_history(symbol: str, period: str) -> pd.DataFrame:
 	return history
 
 
+def calculate_volume_signal(history: pd.DataFrame) -> str | None:
+	"""Classify the latest daily volume using the simple-volume rules."""
+	if len(history) < 51 or not {"Open", "Close", "Volume"}.issubset(history.columns):
+		return None
+
+	volume_data = history[["Open", "Close", "Volume"]].apply(
+		pd.to_numeric, errors="coerce"
+	)
+	if volume_data.iloc[-51:].isna().any().any():
+		return None
+
+	open_price = volume_data["Open"]
+	close = volume_data["Close"]
+	volume = volume_data["Volume"]
+	volume_average = volume.rolling(window=50).mean()
+	down_day_volume = volume.where(close <= open_price, 0)
+	max_down_volume = down_day_volume.shift(1).rolling(window=10).max()
+
+	latest_is_up = close.iloc[-1] > open_price.iloc[-1]
+	latest_is_down = close.iloc[-1] <= open_price.iloc[-1]
+	latest_volume = volume.iloc[-1]
+	latest_average = volume_average.iloc[-1]
+	latest_max_down_volume = max_down_volume.iloc[-1]
+
+	if latest_is_up and latest_volume > latest_max_down_volume:
+		return "Blue"
+	if latest_is_up and latest_volume > latest_average:
+		return "Green"
+	if latest_is_down and latest_volume > latest_average:
+		return "Red"
+	return "Grey (Noise)"
+
+
 def evaluate_symbol(
 	symbol: str, company_name: str, period: str
-) -> tuple[dict[str, str | float] | None, str]:
+) -> tuple[dict[str, str | float | None] | None, str]:
 	"""Return a qualifying output row and a concise PASS/FAIL explanation."""
 	history = fetch_daily_history(symbol, period)
 	if len(history) < 60:
@@ -73,6 +115,7 @@ def evaluate_symbol(
 	hull_trend = str(hull["trend"].iloc[-1]).strip().lower()
 	macd_histogram = float(calculate_macd(close)["histogram"].iloc[-1])
 	latest_close = float(close.iloc[-1])
+	volume_signal = calculate_volume_signal(history)
 
 	failures = []
 	if pd.isna(daily_rsi) or daily_rsi < RSI_MINIMUM:
@@ -93,12 +136,13 @@ def evaluate_symbol(
 		"Daily RSI(14)": round(daily_rsi, 2),
 		"Hull Trend": "Green",
 		"MACD Histogram": round(macd_histogram, 4),
+		"Volume Signal": volume_signal if volume_signal is not None else "None",
 	}, "PASS"
 
 
 def scan_symbols(
 	master: pd.DataFrame, period: str, limit: int = 0
-) -> list[dict[str, str | float]]:
+) -> list[dict[str, str | float | None]]:
 	"""Evaluate symbols and print a PASS or FAIL result for every stock."""
 	if limit > 0:
 		master = master.head(limit)
@@ -119,10 +163,21 @@ def scan_symbols(
 	return matches
 
 
-def save_matches(matches: list[dict[str, str | float]], output_path: Path) -> None:
+def save_matches(
+	matches: list[dict[str, str | float | None]], output_path: Path
+) -> None:
 	"""Save qualifying stocks to an Excel workbook, including an empty result."""
 	output_path.parent.mkdir(parents=True, exist_ok=True)
 	pd.DataFrame(matches, columns=OUTPUT_COLUMNS).to_excel(output_path, index=False)
+	workbook = load_workbook(output_path)
+	worksheet = workbook.active
+	volume_column = OUTPUT_COLUMNS.index("Volume Signal") + 1
+	for row_number in range(2, worksheet.max_row + 1):
+		signal_cell = worksheet.cell(row=row_number, column=volume_column)
+		fill_color = VOLUME_SIGNAL_FILLS.get(signal_cell.value)
+		if fill_color:
+			signal_cell.fill = PatternFill(fill_type="solid", fgColor=fill_color)
+	workbook.save(output_path)
 
 
 def main() -> None:
