@@ -27,9 +27,13 @@ OUTPUT_COLUMNS = [
 	"Close",
 	"Daily RSI(14)",
 	"Hull Trend",
-	"MACD Histogram",
+	"MACD Signal",
 	"Volume Signal",
 ]
+MACD_SIGNAL_FILLS = {
+	"Green": "C6EFCE",
+	"Red": "FFC7CE",
+}
 VOLUME_SIGNAL_FILLS = {
 	"Blue": "D9EAF7",
 	"Green": "C6EFCE",
@@ -135,7 +139,7 @@ def evaluate_symbol(
 		"Close": round(latest_close, 2),
 		"Daily RSI(14)": round(daily_rsi, 2),
 		"Hull Trend": "Green",
-		"MACD Histogram": round(macd_histogram, 4),
+		"MACD Signal": "Green" if macd_histogram > 0 else "Red",
 		"Volume Signal": volume_signal if volume_signal is not None else "None",
 	}, "PASS"
 
@@ -171,8 +175,14 @@ def save_matches(
 	pd.DataFrame(matches, columns=OUTPUT_COLUMNS).to_excel(output_path, index=False)
 	workbook = load_workbook(output_path)
 	worksheet = workbook.active
+	macd_column = OUTPUT_COLUMNS.index("MACD Signal") + 1
 	volume_column = OUTPUT_COLUMNS.index("Volume Signal") + 1
 	for row_number in range(2, worksheet.max_row + 1):
+		macd_cell = worksheet.cell(row=row_number, column=macd_column)
+		macd_fill = MACD_SIGNAL_FILLS.get(macd_cell.value)
+		if macd_fill:
+			macd_cell.fill = PatternFill(fill_type="solid", fgColor=macd_fill)
+
 		signal_cell = worksheet.cell(row=row_number, column=volume_column)
 		fill_color = VOLUME_SIGNAL_FILLS.get(signal_cell.value)
 		if fill_color:
