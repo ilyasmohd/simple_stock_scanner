@@ -6,8 +6,10 @@ import html
 import math
 import threading
 import webbrowser
+from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -24,6 +26,7 @@ from zerodha_session import (
 APP_HOST = "127.0.0.1"
 APP_PORT = 8000
 APP_URL = f"http://{APP_HOST}:{APP_PORT}"
+SMALL_CASE_FILE = Path(__file__).resolve().parent / "masterdata_excels" / "Small_case.csv"
 app = FastAPI(title="Zerodha Portfolio")
 app.include_router(session_router)
 
@@ -43,16 +46,41 @@ def home() -> Response:
     except Exception:
         return RedirectResponse("/login", status_code=303)
 
+    smallcase_symbols = load_smallcase_symbols(SMALL_CASE_FILE)
+    regular_holdings = []
+    smallcase_holdings = []
     for holding in holdings:
+        symbol = _normalize_symbol(holding.get("tradingsymbol", ""))
+        group = smallcase_holdings if symbol in smallcase_symbols else regular_holdings
+        group.append(holding)
+
+    for holding in regular_holdings + smallcase_holdings:
         _evaluate_holding(holding)
 
-    return render_holdings(holdings)
+    return render_holdings(regular_holdings, smallcase_holdings)
+
+
+def _normalize_symbol(symbol: Any) -> str:
+    """Normalize Kite and Yahoo symbol suffixes to the NSE base symbol."""
+    normalized = str(symbol or "").strip().upper()
+    for suffix in (".NS", "-BE"):
+        normalized = normalized.removesuffix(suffix)
+    return normalized
+
+
+def load_smallcase_symbols(input_path: Path) -> set[str]:
+    """Read and normalize the symbols listed in Small_case.csv."""
+    symbols = pd.read_csv(input_path, usecols=["SYMBOL"], encoding="utf-8-sig")["SYMBOL"]
+    return {
+        _normalize_symbol(symbol)
+        for symbol in symbols.dropna()
+        if _normalize_symbol(symbol)
+    }
 
 
 def _evaluate_holding(holding: dict[str, Any]) -> None:
     """Attach the shared automated-selection decision to a Kite holding."""
-    symbol = str(holding.get("tradingsymbol", "")).strip().upper().removesuffix("-BE")
-    holding["tradingsymbol"] = symbol
+    symbol = _normalize_symbol(holding.get("tradingsymbol", ""))
     try:
         result, status = evaluate_symbol(
             symbol,
@@ -65,7 +93,13 @@ def _evaluate_holding(holding: dict[str, Any]) -> None:
 
     holding["selection_result"] = result
     holding["selection_status"] = status
-    holding["qualifies"] = result is not None
+    holding["qualifies"] = status == "PASS"
+    if result is not None:
+        holding["sideways"] = result["Sideways"]
+    elif status.startswith("SKIP:"):
+        holding["sideways"] = None
+    else:
+        holding["sideways"] = "stock is sideways" in status
 
 
 def _format_number(value: Any, decimals: int = 2) -> str:
@@ -102,6 +136,7 @@ def _holding_row(holding: dict[str, Any]) -> str:
         _format_number(holding.get("pnl")),
         _format_number(selection.get("Daily RSI(14)")),
         _format_number(selection.get("MACD Histogram"), 4),
+        str(holding["sideways"]) if holding.get("sideways") is not None else "N/A",
         decision,
         criteria,
     )
@@ -109,14 +144,36 @@ def _holding_row(holding: dict[str, Any]) -> str:
     return f'<tr class="{row_class}">{cells}</tr>'
 
 
-def render_holdings(holdings: list[dict]) -> HTMLResponse:
-    """Render portfolio holdings with their automated-selection decisions."""
+def _render_holding_grid(title: str, holdings: list[dict]) -> str:
+    """Render one portfolio group as a separate holdings grid."""
     rows = "".join(_holding_row(holding) for holding in holdings)
     if not rows:
-        rows = "<tr><td colspan='9' class='empty'>No holdings found.</td></tr>"
+        rows = "<tr><td colspan='10' class='empty'>No holdings found.</td></tr>"
 
-    qualifying_count = sum(bool(holding.get("qualifies")) for holding in holdings)
-    flagged_count = len(holdings) - qualifying_count
+    return f"""
+<section class="portfolio-group">
+<h2>{html.escape(title)} <span>{len(holdings)}</span></h2>
+<div class="table-wrap">
+<table><thead><tr>
+<th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
+<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Sideways</th><th>Decision</th><th>Criteria</th>
+</tr></thead><tbody>{rows}</tbody></table>
+</div>
+</section>"""
+
+
+def render_holdings(
+    regular_holdings: list[dict], smallcase_holdings: list[dict] | None = None
+) -> HTMLResponse:
+    """Render regular and Smallcase holdings in separate grids."""
+    smallcase_holdings = smallcase_holdings or []
+    all_holdings = regular_holdings + smallcase_holdings
+    qualifying_count = sum(bool(holding.get("qualifies")) for holding in all_holdings)
+    flagged_count = len(all_holdings) - qualifying_count
+    
+    # Swapped variable assignments to fix the UI grouping bug
+    regular_grid= _render_holding_grid("Small Case Stocks", regular_holdings)
+    smallcase_grid = _render_holding_grid("Kite Holdings", smallcase_holdings)
 
     return HTMLResponse(
         f"""<!doctype html>
@@ -130,6 +187,9 @@ h1 {{ margin: 0; font-size: 24px; }}
 .refresh {{ color: #145f77; }}
 .summary {{ display: flex; gap: 20px; margin: 12px 0 20px; color: #52616b; }}
 .summary strong {{ color: #1f2933; }}
+.portfolio-group {{ margin-top: 24px; }}
+.portfolio-group h2 {{ margin: 0 0 10px; font-size: 18px; }}
+.portfolio-group h2 span {{ color: #52616b; font-size: 14px; font-weight: 400; }}
 .table-wrap {{ overflow-x: auto; background: #fff; border: 1px solid #d5dde1; }}
 table {{ width: 100%; border-collapse: collapse; white-space: nowrap; }}
 th, td {{ border-bottom: 1px solid #e0e5e8; padding: 10px 12px; text-align: right; }}
@@ -144,15 +204,11 @@ tr.flagged td:nth-last-child(2) {{ font-weight: 700; }}
 </style></head><body>
 <main>
 <header><h1>Portfolio Dashboard</h1><a class="refresh" href="/">Refresh analysis</a></header>
-<div class="summary"><span>Holdings <strong>{len(holdings)}</strong></span>
+<div class="summary"><span>Holdings <strong>{len(all_holdings)}</strong></span>
 <span>Qualifying <strong>{qualifying_count}</strong></span>
 <span>Flagged <strong>{flagged_count}</strong></span></div>
-<div class="table-wrap">
-<table><thead><tr>
-<th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
-<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Decision</th><th>Criteria</th>
-</tr></thead><tbody>{rows}</tbody></table>
-</div>
+{smallcase_grid}
+{regular_grid}
 </main>
 </body></html>"""
     )

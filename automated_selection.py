@@ -79,19 +79,20 @@ def evaluate_history(
 		failures.append(f"MACD histogram={macd_histogram:.4f} is not positive")
 	if is_sideways:
 		failures.append("stock is sideways")
-	if failures:
-		return None, "FAIL: " + "; ".join(failures)
-
-	return {
+	result = {
 		"Symbol": symbol,
 		"Name of Company": company_name,
 		"Date": history.index[-1].strftime("%Y-%m-%d"),
 		"Close": round(float(close.iloc[-1]), 2),
 		"Daily RSI(14)": round(daily_rsi, 2),
 		"MACD Histogram": round(macd_histogram, 4),
-		"Histogram Positive": True,
-		"Sideways": False,
-	}, "PASS"
+		"Histogram Positive": bool(macd_histogram > 0),
+		"Sideways": is_sideways,
+	}
+	if failures:
+		return result, "FAIL: " + "; ".join(failures)
+
+	return result, "PASS"
 
 
 def evaluate_symbol(
@@ -126,7 +127,7 @@ def scan_symbols(
 			result, status = None, f"SKIP: {error}"
 
 		print(f"[{position + 1}/{total}] {symbol}: {status}")
-		if result is not None:
+		if result is not None and status == "PASS":
 			matches.append(result)
 
 	matches.sort(key=lambda match: float(match["Daily RSI(14)"]), reverse=True)
