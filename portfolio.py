@@ -27,6 +27,12 @@ APP_HOST = "127.0.0.1"
 APP_PORT = 8000
 APP_URL = f"http://{APP_HOST}:{APP_PORT}"
 SMALL_CASE_FILE = Path(__file__).resolve().parent / "masterdata_excels" / "Small_case.csv"
+VOLUME_SIGNAL_CLASSES = {
+    "Blue": "volume-blue",
+    "Green": "volume-green",
+    "Red": "volume-red",
+    "Grey (Noise)": "volume-grey-noise",
+}
 app = FastAPI(title="Zerodha Portfolio")
 app.include_router(session_router)
 
@@ -128,6 +134,8 @@ def _holding_row(holding: dict[str, Any]) -> str:
     else:
         criteria = str(holding.get("selection_status", "Did not meet scanner criteria"))
 
+    signal = selection.get("Volume Signal")
+    volume_signal = "N/A" if signal in (None, "None") else str(signal)
     values = (
         holding.get("tradingsymbol", ""),
         _format_number(holding.get("quantity"), 0),
@@ -137,18 +145,25 @@ def _holding_row(holding: dict[str, Any]) -> str:
         _format_number(selection.get("Daily RSI(14)")),
         _format_number(selection.get("MACD Histogram"), 4),
         str(holding["sideways"]) if holding.get("sideways") is not None else "N/A",
+        volume_signal,
         decision,
         criteria,
     )
-    cells = "".join(f"<td>{html.escape(str(value), quote=True)}</td>" for value in values)
-    return f'<tr class="{row_class}">{cells}</tr>'
+    cells = []
+    for index, value in enumerate(values):
+        signal_class = VOLUME_SIGNAL_CLASSES.get(str(value)) if index == 8 else None
+        class_attribute = f' class="{signal_class}"' if signal_class else ""
+        cells.append(
+            f"<td{class_attribute}>{html.escape(str(value), quote=True)}</td>"
+        )
+    return f'<tr class="{row_class}">{"".join(cells)}</tr>'
 
 
 def _render_holding_grid(title: str, holdings: list[dict]) -> str:
     """Render one portfolio group as a separate holdings grid."""
     rows = "".join(_holding_row(holding) for holding in holdings)
     if not rows:
-        rows = "<tr><td colspan='10' class='empty'>No holdings found.</td></tr>"
+        rows = "<tr><td colspan='11' class='empty'>No holdings found.</td></tr>"
 
     return f"""
 <section class="portfolio-group">
@@ -156,7 +171,7 @@ def _render_holding_grid(title: str, holdings: list[dict]) -> str:
 <div class="table-wrap">
 <table><thead><tr>
 <th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
-<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Sideways</th><th>Decision</th><th>Criteria</th>
+<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Sideways</th><th>Volume Signal</th><th>Decision</th><th>Criteria</th>
 </tr></thead><tbody>{rows}</tbody></table>
 </div>
 </section>"""
@@ -196,6 +211,10 @@ th, td {{ border-bottom: 1px solid #e0e5e8; padding: 10px 12px; text-align: righ
 th {{ position: sticky; top: 0; background: #244b5a; color: #fff; font-weight: 600; }}
 th:first-child, td:first-child {{ text-align: left; }}
 td:last-child {{ text-align: left; white-space: normal; min-width: 280px; }}
+td.volume-blue {{ background: #d9eaf7 !important; color: #1f4e78 !important; font-weight: 700; }}
+td.volume-green {{ background: #c6efce !important; color: #006100 !important; font-weight: 700; }}
+td.volume-red {{ background: #ffc7ce !important; color: #9c0006 !important; font-weight: 700; }}
+td.volume-grey-noise {{ background: #d9d9d9 !important; color: #404040 !important; font-weight: 700; }}
 tr.flagged td {{ background: #fff0ef; color: #782b25; }}
 tr.qualifies td {{ background: #eff8f1; }}
 tr.flagged td:nth-last-child(2) {{ font-weight: 700; }}

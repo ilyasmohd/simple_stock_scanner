@@ -67,6 +67,49 @@ def calculate_macd(close: pd.Series) -> pd.DataFrame:
     )
 
 
+def calculate_volume_signal(history: pd.DataFrame) -> str | None:
+    """Classify the latest daily volume using the simple-volume rules."""
+    if isinstance(history.columns, pd.MultiIndex):
+        history = history.copy()
+        history.columns = history.columns.get_level_values(0)
+    columns = {
+        str(column).strip().lower().replace(" ", "_"): column
+        for column in history.columns
+    }
+    required = {"open", "close", "volume"}
+    if len(history) < 51 or not required.issubset(columns):
+        return None
+
+    volume_data = history[
+        [columns["open"], columns["close"], columns["volume"]]
+    ].apply(pd.to_numeric, errors="coerce")
+    if volume_data.iloc[-51:].isna().any().any():
+        return None
+
+    open_price, close, volume = (
+        volume_data.iloc[:, 0],
+        volume_data.iloc[:, 1],
+        volume_data.iloc[:, 2],
+    )
+    volume_average = volume.rolling(window=50).mean()
+    down_day_volume = volume.where(close <= open_price, 0)
+    max_down_volume = down_day_volume.shift(1).rolling(window=10).max()
+
+    latest_is_up = close.iloc[-1] > open_price.iloc[-1]
+    latest_is_down = close.iloc[-1] <= open_price.iloc[-1]
+    latest_volume = volume.iloc[-1]
+    latest_average = volume_average.iloc[-1]
+    latest_max_down_volume = max_down_volume.iloc[-1]
+
+    if latest_is_up and latest_volume > latest_max_down_volume:
+        return "Blue"
+    if latest_is_up and latest_volume > latest_average:
+        return "Green"
+    if latest_is_down and latest_volume > latest_average:
+        return "Red"
+    return "Grey (Noise)"
+
+
 def _latest_number(value: Any) -> float | None:
     """Convert a pandas/numpy number to a JSON- and HTML-friendly float."""
     if value is None or pd.isna(value):

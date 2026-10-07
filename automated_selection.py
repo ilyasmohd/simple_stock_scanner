@@ -12,6 +12,7 @@ from openpyxl.styles import Font, PatternFill
 
 import sideways
 from scan_nse_all_stocks import calculate_macd, calculate_rsi
+from stock_indicators import calculate_volume_signal
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -30,7 +31,14 @@ OUTPUT_COLUMNS = [
 	"MACD Histogram",
 	"Histogram Positive",
 	"Sideways",
+	"Volume Signal",
 ]
+VOLUME_SIGNAL_FILLS = {
+	"Blue": "D9EAF7",
+	"Green": "C6EFCE",
+	"Red": "FFC7CE",
+	"Grey (Noise)": "D9D9D9",
+}
 
 
 def load_master_symbols(input_path: Path) -> pd.DataFrame:
@@ -71,6 +79,7 @@ def evaluate_history(
 	macd_histogram = float(calculate_macd(close)["histogram"].iloc[-1])
 	sideways_result = sideways.detect_sideways(history, config)
 	is_sideways = bool(sideways_result["sideways"].iloc[-1])
+	volume_signal = calculate_volume_signal(history)
 
 	failures = []
 	if pd.isna(daily_rsi) or daily_rsi <= RSI_MINIMUM:
@@ -88,6 +97,7 @@ def evaluate_history(
 		"MACD Histogram": round(macd_histogram, 4),
 		"Histogram Positive": bool(macd_histogram > 0),
 		"Sideways": is_sideways,
+		"Volume Signal": volume_signal if volume_signal is not None else "None",
 	}
 	if failures:
 		return result, "FAIL: " + "; ".join(failures)
@@ -148,6 +158,12 @@ def save_matches(
 	for cell in worksheet[1]:
 		cell.font = Font(bold=True, color="FFFFFF")
 		cell.fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+	volume_column = OUTPUT_COLUMNS.index("Volume Signal") + 1
+	for row_number in range(2, worksheet.max_row + 1):
+		signal_cell = worksheet.cell(row=row_number, column=volume_column)
+		fill_color = VOLUME_SIGNAL_FILLS.get(signal_cell.value)
+		if fill_color:
+			signal_cell.fill = PatternFill(fill_type="solid", fgColor=fill_color)
 	for column_cells in worksheet.columns:
 		width = max(len(str(cell.value or "")) for cell in column_cells)
 		worksheet.column_dimensions[column_cells[0].column_letter].width = min(width + 2, 40)

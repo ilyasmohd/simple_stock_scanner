@@ -13,6 +13,7 @@ from openpyxl.styles import PatternFill
 
 from hull_trend_strategy import HullConfig, hull_trend_strategy
 from scan_nse_all_stocks import calculate_macd, calculate_rsi
+from stock_indicators import calculate_volume_signal
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -70,39 +71,6 @@ def fetch_daily_history(symbol: str, period: str) -> pd.DataFrame:
 	if history.empty:
 		raise ValueError("no valid daily closing prices returned")
 	return history
-
-
-def calculate_volume_signal(history: pd.DataFrame) -> str | None:
-	"""Classify the latest daily volume using the simple-volume rules."""
-	if len(history) < 51 or not {"Open", "Close", "Volume"}.issubset(history.columns):
-		return None
-
-	volume_data = history[["Open", "Close", "Volume"]].apply(
-		pd.to_numeric, errors="coerce"
-	)
-	if volume_data.iloc[-51:].isna().any().any():
-		return None
-
-	open_price = volume_data["Open"]
-	close = volume_data["Close"]
-	volume = volume_data["Volume"]
-	volume_average = volume.rolling(window=50).mean()
-	down_day_volume = volume.where(close <= open_price, 0)
-	max_down_volume = down_day_volume.shift(1).rolling(window=10).max()
-
-	latest_is_up = close.iloc[-1] > open_price.iloc[-1]
-	latest_is_down = close.iloc[-1] <= open_price.iloc[-1]
-	latest_volume = volume.iloc[-1]
-	latest_average = volume_average.iloc[-1]
-	latest_max_down_volume = max_down_volume.iloc[-1]
-
-	if latest_is_up and latest_volume > latest_max_down_volume:
-		return "Blue"
-	if latest_is_up and latest_volume > latest_average:
-		return "Green"
-	if latest_is_down and latest_volume > latest_average:
-		return "Red"
-	return "Grey (Noise)"
 
 
 def evaluate_symbol(
