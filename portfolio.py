@@ -172,8 +172,8 @@ def render_holdings(
     flagged_count = len(all_holdings) - qualifying_count
     
     # Swapped variable assignments to fix the UI grouping bug
-    regular_grid= _render_holding_grid("Small Case Stocks", regular_holdings)
-    smallcase_grid = _render_holding_grid("Kite Holdings", smallcase_holdings)
+    regular_grid = _render_holding_grid("Kite Holdings", regular_holdings)
+    smallcase_grid = _render_holding_grid("Small Case Stocks", smallcase_holdings)
 
     return HTMLResponse(
         f"""<!doctype html>
