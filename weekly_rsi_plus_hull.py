@@ -10,7 +10,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from hull_trend_strategy import HullConfig, hull_trend_strategy
+from hull_trend_strategy_weekly import HullConfig, hull_trend_strategy
 
 
 DEFAULT_INPUT = Path(__file__).resolve().parent / "masterdata_excels" / "EQUITY_L.csv"

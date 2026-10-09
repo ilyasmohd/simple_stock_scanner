@@ -11,7 +11,7 @@ import yfinance as yf
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
-from hull_trend_strategy import HullConfig, hull_trend_strategy
+from hull_trend_strategy_weekly import HullConfig, hull_trend_strategy
 from scan_nse_all_stocks import calculate_macd, calculate_rsi
 from stock_indicators import calculate_volume_signal
 
