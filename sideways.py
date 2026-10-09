@@ -606,7 +606,13 @@ def _attach_hover(fig, axes, result: pd.DataFrame):
     return on_move
 
 
-def plot_result(result: pd.DataFrame, title: str = "", save: Optional[str] = None) -> None:
+def plot_result(
+    result: pd.DataFrame,
+    title: str = "",
+    save: Optional[str] = None,
+    figsize: tuple[float, float] = (13, 7),
+    dpi: int = 130,
+) -> None:
     """Close + EMA with sideways runs shaded (backfilled, for eyeballing) and a vote panel."""
     import matplotlib
 
@@ -615,7 +621,7 @@ def plot_result(result: pd.DataFrame, title: str = "", save: Optional[str] = Non
     import matplotlib.pyplot as plt
 
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(13, 7), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+        2, 1, figsize=figsize, sharex=True, gridspec_kw={"height_ratios": [3, 1]}
     )
     ax1.plot(result.index, result["close"], lw=1.2, label="Close")
     ax1.plot(result.index, result["ema"], lw=1.0, alpha=0.8, label="EMA")
@@ -628,6 +634,22 @@ def plot_result(result: pd.DataFrame, title: str = "", save: Optional[str] = Non
     ax1.set_title(title or "Sideways detection")
     ax1.legend(loc="upper left", fontsize=8)
     ax1.grid(alpha=0.25)
+    sideways_runs = result["sideways_backfilled"].to_numpy(dtype=bool)
+    exits = np.flatnonzero(sideways_runs[:-1] & ~sideways_runs[1:]) + 1
+    for exit_position in exits:
+        exit_date = pd.Timestamp(result.index[exit_position])
+        ax1.axvline(exit_date, color="green", lw=0.9, ls="--", alpha=0.75)
+        ax1.annotate(
+            exit_date.strftime("%m-%d"),
+            xy=(exit_date, 0.98),
+            xycoords=("data", "axes fraction"),
+            xytext=(3, -3),
+            textcoords="offset points",
+            rotation=90,
+            va="top",
+            fontsize=8,
+            color="green",
+        )
     ax2.step(result.index, result["votes"], where="post", lw=1.0)
     ax2.set_ylabel("votes")
     ax2.set_ylim(-0.2, len(_VOTE_COLS) + 0.2)
@@ -635,7 +657,7 @@ def plot_result(result: pd.DataFrame, title: str = "", save: Optional[str] = Non
     _attach_hover(fig, (ax1, ax2), result)
     fig.tight_layout()
     if save:
-        fig.savefig(save, dpi=130)
+        fig.savefig(save, dpi=dpi)
         plt.close(fig)
     else:
         plt.show()
