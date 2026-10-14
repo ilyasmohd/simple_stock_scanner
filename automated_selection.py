@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 
 import sideways
+from hull_trend_strategy_daily import HullConfig, hull_trend_strategy
 from scan_nse_all_stocks import calculate_macd, calculate_rsi
 from stock_indicators import calculate_volume_signal
 
@@ -28,11 +29,16 @@ OUTPUT_COLUMNS = [
 	"Date",
 	"Close",
 	"Daily RSI(14)",
+	"Hull Trend",
 	"MACD Histogram",
 	"Histogram Positive",
 	"Sideways",
 	"Volume Signal",
 ]
+HULL_TREND_FILLS = {
+	"Green": "C6EFCE",
+	"Red": "FFC7CE",
+}
 VOLUME_SIGNAL_FILLS = {
 	"Blue": "D9EAF7",
 	"Green": "C6EFCE",
@@ -77,6 +83,8 @@ def evaluate_history(
 
 	daily_rsi = float(calculate_rsi(close, period=14).iloc[-1])
 	macd_histogram = float(calculate_macd(close)["histogram"].iloc[-1])
+	hull = hull_trend_strategy(history, HullConfig(length=24, src_col="close"))
+	hull_trend = str(hull["trend"].iloc[-1]).strip().capitalize()
 	sideways_result = sideways.detect_sideways(history, config)
 	is_sideways = bool(sideways_result["sideways"].iloc[-1])
 	volume_signal = calculate_volume_signal(history)
@@ -94,6 +102,7 @@ def evaluate_history(
 		"Date": history.index[-1].strftime("%Y-%m-%d"),
 		"Close": round(float(close.iloc[-1]), 2),
 		"Daily RSI(14)": round(daily_rsi, 2),
+		"Hull Trend": hull_trend,
 		"MACD Histogram": round(macd_histogram, 4),
 		"Histogram Positive": bool(macd_histogram > 0),
 		"Sideways": is_sideways,
@@ -158,8 +167,14 @@ def save_matches(
 	for cell in worksheet[1]:
 		cell.font = Font(bold=True, color="FFFFFF")
 		cell.fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+	hull_column = OUTPUT_COLUMNS.index("Hull Trend") + 1
 	volume_column = OUTPUT_COLUMNS.index("Volume Signal") + 1
 	for row_number in range(2, worksheet.max_row + 1):
+		hull_cell = worksheet.cell(row=row_number, column=hull_column)
+		hull_fill = HULL_TREND_FILLS.get(hull_cell.value)
+		if hull_fill:
+			hull_cell.fill = PatternFill(fill_type="solid", fgColor=hull_fill)
+
 		signal_cell = worksheet.cell(row=row_number, column=volume_column)
 		fill_color = VOLUME_SIGNAL_FILLS.get(signal_cell.value)
 		if fill_color:
