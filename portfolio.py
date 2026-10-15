@@ -16,7 +16,12 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from automated_selection import DEFAULT_YEARS, SIDEWAYS_CONFIG, evaluate_symbol
+from automated_selection import (
+    DEFAULT_YEARS,
+    SIDEWAYS_CONFIG,
+    evaluate_symbol,
+    price_distance_from_ema10,
+)
 from zerodha_sell import get_kite_client, place_holding_sell_order
 from zerodha_session import (
     router as session_router,
@@ -175,6 +180,19 @@ def _format_number(value: Any, decimals: int = 2) -> str:
     return f"{number:,.{decimals}f}"
 
 
+def _format_signed_number(
+    value: Any, decimals: int = 2, suffix: str = ""
+) -> str:
+    """Format a finite signed number, or show N/A for unavailable data."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not math.isfinite(number):
+        return "N/A"
+    return f"{number:+,.{decimals}f}{suffix}"
+
+
 def _holding_row(holding: dict[str, Any], allow_sell: bool = False) -> str:
     """Render one holding, marking any failed scanner condition in red."""
     qualifies = bool(holding.get("qualifies"))
@@ -192,6 +210,14 @@ def _holding_row(holding: dict[str, Any], allow_sell: bool = False) -> str:
 
     signal = selection.get("Volume Signal")
     volume_signal = "N/A" if signal in (None, "None") else str(signal)
+    try:
+        ltp = float(holding.get("last_price"))
+        ema10 = float(selection.get("10 EMA"))
+        ltp_ema10_difference, ltp_ema10_percentage = price_distance_from_ema10(
+            ltp, ema10
+        )
+    except (TypeError, ValueError):
+        ltp_ema10_difference, ltp_ema10_percentage = None, None
     values = (
         holding.get("tradingsymbol", ""),
         _format_number(holding.get("quantity"), 0),
@@ -204,6 +230,9 @@ def _holding_row(holding: dict[str, Any], allow_sell: bool = False) -> str:
         volume_signal,
         decision,
         criteria,
+        _format_number(selection.get("10 EMA")),
+        _format_signed_number(ltp_ema10_difference),
+        _format_signed_number(ltp_ema10_percentage, suffix="%"),
     )
     cells = []
     for index, value in enumerate(values):
@@ -242,7 +271,7 @@ def _render_holding_grid(
     """Render one portfolio group as a separate holdings grid."""
     rows = "".join(_holding_row(holding, allow_sell) for holding in holdings)
     if not rows:
-        column_count = 12 if allow_sell else 11
+        column_count = 15 if allow_sell else 14
         rows = f"<tr><td colspan='{column_count}' class='empty'>No holdings found.</td></tr>"
     sell_header = "<th>Action</th>" if allow_sell else ""
 
@@ -252,7 +281,8 @@ def _render_holding_grid(
 <div class="table-wrap">
 <table><thead><tr>
 <th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
-<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Sideways</th><th>Volume Signal</th><th>Decision</th><th>Criteria</th>{sell_header}
+<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Sideways</th><th>Volume Signal</th><th>Decision</th><th>Criteria</th>
+<th>10 EMA</th><th>LTP - 10 EMA</th><th>LTP vs 10 EMA (%)</th>{sell_header}
 </tr></thead><tbody>{rows}</tbody></table>
 </div>
 </section>"""
@@ -280,8 +310,9 @@ def render_holdings(
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Portfolio Dashboard</title>
 <style>
+* {{ box-sizing: border-box; }}
 body {{ margin: 0; background: #f4f6f7; color: #1f2933; font: 14px/1.45 system-ui, sans-serif; }}
-main {{ max-width: 1500px; margin: 0 auto; padding: 28px 24px; }}
+main {{ width: 100%; max-width: 1700px; margin: 0 auto; padding: 28px 24px; }}
 header {{ display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }}
 h1 {{ margin: 0; font-size: 24px; }}
 .refresh {{ color: #145f77; }}
@@ -290,13 +321,15 @@ h1 {{ margin: 0; font-size: 24px; }}
 .portfolio-group {{ margin-top: 24px; }}
 .portfolio-group h2 {{ margin: 0 0 10px; font-size: 18px; }}
 .portfolio-group h2 span {{ color: #52616b; font-size: 14px; font-weight: 400; }}
-.table-wrap {{ overflow-x: auto; background: #fff; border: 1px solid #d5dde1; }}
-table {{ width: 100%; border-collapse: collapse; white-space: nowrap; }}
-th, td {{ border-bottom: 1px solid #e0e5e8; padding: 10px 12px; text-align: right; }}
+.table-wrap {{ width: 100%; overflow-x: hidden; background: #fff; border: 1px solid #d5dde1; }}
+table {{ width: 100%; table-layout: fixed; border-collapse: collapse; }}
+th, td {{ border-bottom: 1px solid #e0e5e8; padding: 8px 5px; text-align: right; overflow-wrap: anywhere; }}
 th {{ position: sticky; top: 0; background: #244b5a; color: #fff; font-weight: 600; }}
 th:first-child, td:first-child {{ text-align: left; }}
-td:nth-child(11) {{ text-align: left; white-space: normal; min-width: 280px; }}
-td:nth-child(12) {{ text-align: center; }}
+th:nth-child(1), td:nth-child(1) {{ width: 6%; }}
+td:nth-child(5) {{ font-weight: 700; }}
+th:nth-child(11), td:nth-child(11) {{ width: 28%; text-align: left; white-space: nowrap; overflow-wrap: normal; }}
+td:nth-child(15) {{ text-align: center; }}
 .sell-button {{ border: 0; border-radius: 4px; padding: 7px 12px; background: #b42318; color: #fff; cursor: pointer; }}
 .sell-button:disabled {{ background: #9aa4ad; cursor: not-allowed; }}
 td.volume-blue {{ background: #d9eaf7 !important; color: #1f4e78 !important; font-weight: 700; }}
@@ -307,7 +340,7 @@ tr.flagged td {{ background: #fff0ef; color: #782b25; }}
 tr.qualifies td {{ background: #eff8f1; }}
 tr.flagged td:nth-child(10) {{ font-weight: 700; }}
 .empty {{ text-align: center !important; padding: 28px; color: #52616b; }}
-@media (max-width: 640px) {{ main {{ padding: 18px 12px; }} header {{ align-items: flex-start; }} h1 {{ font-size: 20px; }} .summary {{ flex-wrap: wrap; gap: 8px 16px; }} }}
+@media (max-width: 900px) {{ main {{ padding: 18px 12px; }} header {{ align-items: flex-start; }} h1 {{ font-size: 20px; }} .summary {{ flex-wrap: wrap; gap: 8px 16px; }} th, td {{ padding: 6px 3px; font-size: 11px; }} }}
 </style></head><body>
 <main>
 <header><h1>Portfolio Dashboard</h1><a class="refresh" href="/">Refresh analysis</a></header>

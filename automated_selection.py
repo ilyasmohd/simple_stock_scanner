@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+from math import isfinite
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +29,9 @@ OUTPUT_COLUMNS = [
 	"Name of Company",
 	"Date",
 	"Close",
+	"10 EMA",
+	"Close - 10 EMA",
+	"Close vs 10 EMA (%)",
 	"Daily RSI(14)",
 	"Hull Trend",
 	"MACD Histogram",
@@ -45,6 +49,18 @@ VOLUME_SIGNAL_FILLS = {
 	"Red": "FFC7CE",
 	"Grey (Noise)": "D9D9D9",
 }
+
+
+def price_distance_from_ema10(
+	price: float, ema10: float
+) -> tuple[float | None, float | None]:
+	"""Return the signed price difference and percentage distance from EMA10."""
+	if not isfinite(price) or not isfinite(ema10) or ema10 <= 0:
+		return None, None
+
+	difference = price - ema10
+	percentage = difference / ema10 * 100
+	return round(difference, 2), round(percentage, 2)
 
 
 def load_master_symbols(input_path: Path) -> pd.DataFrame:
@@ -83,6 +99,11 @@ def evaluate_history(
 
 	daily_rsi = float(calculate_rsi(close, period=14).iloc[-1])
 	macd_histogram = float(calculate_macd(close)["histogram"].iloc[-1])
+	ema10 = float(close.ewm(span=10, adjust=False).mean().iloc[-1])
+	latest_close = float(close.iloc[-1])
+	close_ema10_difference, close_ema10_percentage = price_distance_from_ema10(
+		latest_close, ema10
+	)
 	hull = hull_trend_strategy(history, HullConfig(length=24, src_col="close"))
 	hull_trend = str(hull["trend"].iloc[-1]).strip().capitalize()
 	sideways_result = sideways.detect_sideways(history, config)
@@ -102,7 +123,10 @@ def evaluate_history(
 		"Symbol": symbol,
 		"Name of Company": company_name,
 		"Date": history.index[-1].strftime("%Y-%m-%d"),
-		"Close": round(float(close.iloc[-1]), 2),
+		"Close": round(latest_close, 2),
+		"10 EMA": round(ema10, 2),
+		"Close - 10 EMA": close_ema10_difference,
+		"Close vs 10 EMA (%)": close_ema10_percentage,
 		"Daily RSI(14)": round(daily_rsi, 2),
 		"Hull Trend": hull_trend,
 		"MACD Histogram": round(macd_histogram, 4),
@@ -181,6 +205,17 @@ def save_matches(
 		fill_color = VOLUME_SIGNAL_FILLS.get(signal_cell.value)
 		if fill_color:
 			signal_cell.fill = PatternFill(fill_type="solid", fgColor=fill_color)
+	for column_name in ("Close", "10 EMA", "Close - 10 EMA"):
+		column_number = OUTPUT_COLUMNS.index(column_name) + 1
+		for row_number in range(2, worksheet.max_row + 1):
+			worksheet.cell(row=row_number, column=column_number).number_format = (
+				"+0.00;-0.00;0.00" if column_name == "Close - 10 EMA" else "0.00"
+			)
+	percentage_column = OUTPUT_COLUMNS.index("Close vs 10 EMA (%)") + 1
+	for row_number in range(2, worksheet.max_row + 1):
+		worksheet.cell(row=row_number, column=percentage_column).number_format = (
+			'+0.00"%";-0.00"%";0.00"%"'
+		)
 	for column_cells in worksheet.columns:
 		width = max(len(str(cell.value or "")) for cell in column_cells)
 		worksheet.column_dimensions[column_cells[0].column_letter].width = min(width + 2, 40)
