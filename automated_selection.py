@@ -1,4 +1,4 @@
-"""Find NSE stocks with RSI above 60, positive MACD histogram, and no sideways regime."""
+"""Find NSE stocks with green Hull trend, high RSI, and no sideways regime."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from stock_indicators import calculate_volume_signal
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_INPUT = PROJECT_ROOT / "masterdata_excels" / "EQUITY_L.csv"
 OUTPUT_DIR = PROJECT_ROOT / "daily_nse_scans_alerts"
-RSI_MINIMUM = 60.0
+RSI_MINIMUM = 65.0
 DEFAULT_YEARS = 2.0
 DEFAULT_MIN_DURATION = 1
 SIDEWAYS_CONFIG = sideways.SidewaysConfig(min_duration=DEFAULT_MIN_DURATION)
@@ -70,7 +70,7 @@ def evaluate_history(
 	history: pd.DataFrame,
 	config: sideways.SidewaysConfig = SIDEWAYS_CONFIG,
 ) -> tuple[dict[str, str | float | bool] | None, str]:
-	"""Evaluate the latest completed daily bar against all three scan conditions."""
+	"""Evaluate the latest completed daily bar against all scan conditions."""
 	if len(history) < config.effective_warmup:
 		return None, (
 			f"SKIP: only {len(history)} daily bars; need at least "
@@ -90,10 +90,12 @@ def evaluate_history(
 	volume_signal = calculate_volume_signal(history)
 
 	failures = []
-	if pd.isna(daily_rsi) or daily_rsi <= RSI_MINIMUM:
+	if pd.isna(daily_rsi) or daily_rsi < RSI_MINIMUM:
 		failures.append(f"daily RSI={daily_rsi:.2f} is not above {RSI_MINIMUM:.0f}")
-	if pd.isna(macd_histogram) or macd_histogram <= 0:
-		failures.append(f"MACD histogram={macd_histogram:.4f} is not positive")
+	if hull_trend != "Green":
+		failures.append("Hull trend is not Green")
+	#if pd.isna(macd_histogram) or macd_histogram <= 0:
+		#failures.append(f"MACD histogram={macd_histogram:.4f} is not positive")
 	if is_sideways:
 		failures.append("stock is sideways")
 	result = {
@@ -187,7 +189,7 @@ def save_matches(
 
 def main() -> None:
 	parser = argparse.ArgumentParser(
-		description="Scan NSE stocks for daily RSI, positive MACD histogram, and sideways status."
+		description="Scan NSE stocks for green Hull trend, high RSI, and sideways status."
 	)
 	parser.add_argument(
 		"--input", type=Path, default=DEFAULT_INPUT, help="Path to EQUITY_L.csv"
