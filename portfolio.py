@@ -6,19 +6,19 @@ import html
 import math
 import threading
 import webbrowser
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pandas as pd
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from kiteconnect import KiteConnect
 
 from automated_selection import DEFAULT_YEARS, SIDEWAYS_CONFIG, evaluate_symbol
+from zerodha_sell import get_kite_client, place_holding_sell_order
 from zerodha_session import (
-    get_todays_access_token,
-    load_secrets,
     router as session_router,
 )
 
@@ -40,14 +40,8 @@ app.include_router(session_router)
 @app.get("/", response_class=HTMLResponse)
 def home() -> Response:
     """Read today's token, fetch holdings, or start the login flow."""
-    access_token = get_todays_access_token()
-    if not access_token:
-        return RedirectResponse("/login", status_code=303)
-
     try:
-        api_key, _ = load_secrets()
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
+        kite = get_kite_client()
         holdings = kite.holdings()
     except Exception:
         return RedirectResponse("/login", status_code=303)
@@ -64,6 +58,68 @@ def home() -> Response:
         _evaluate_holding(holding)
 
     return render_holdings(regular_holdings, smallcase_holdings)
+
+
+def _sell_result(message: str, status_code: int) -> HTMLResponse:
+    """Render an escaped sell-order result with a link back to holdings."""
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>Sell order</title></head><body>"
+        f"<p>{html.escape(message, quote=True)}</p>"
+        "<p><a href='/'>Return to portfolio</a></p></body></html>",
+        status_code=status_code,
+    )
+
+
+@app.post("/sell/{symbol}", response_class=HTMLResponse)
+def sell_holding(symbol: str) -> HTMLResponse:
+    """Sell the full current holding through the reusable Zerodha sell service."""
+    requested_symbol = _normalize_symbol(symbol)
+    if not requested_symbol:
+        return _sell_result("A valid trading symbol is required.", 400)
+
+    try:
+        kite = get_kite_client()
+        holding = next(
+            (
+                item
+                for item in kite.holdings()
+                if _normalize_symbol(item.get("tradingsymbol", "")) == requested_symbol
+            ),
+            None,
+        )
+        if holding is None:
+            return _sell_result(
+                f"{requested_symbol} is not present in current Kite holdings.", 404
+            )
+
+        try:
+            quantity_value = Decimal(str(holding.get("quantity", "")))
+        except (InvalidOperation, TypeError, ValueError) as error:
+            raise ValueError("Kite returned an invalid holding quantity.") from error
+        if (
+            not quantity_value.is_finite()
+            or quantity_value <= 0
+            or quantity_value != quantity_value.to_integral_value()
+        ):
+            return _sell_result(
+                f"{requested_symbol} has no valid whole-share quantity to sell.", 400
+            )
+
+        quantity = int(quantity_value)
+        order_id, limit_price = place_holding_sell_order(
+            requested_symbol,
+            quantity,
+            kite_client=kite,
+        )
+    except Exception as error:
+        return _sell_result(f"Sell order failed: {error}", 502)
+
+    return _sell_result(
+        f"Sell order placed for all {quantity} {requested_symbol} shares at "
+        f"limit {limit_price:.2f}. Order ID: {order_id}",
+        200,
+    )
 
 
 def _normalize_symbol(symbol: Any) -> str:
@@ -119,7 +175,7 @@ def _format_number(value: Any, decimals: int = 2) -> str:
     return f"{number:,.{decimals}f}"
 
 
-def _holding_row(holding: dict[str, Any]) -> str:
+def _holding_row(holding: dict[str, Any], allow_sell: bool = False) -> str:
     """Render one holding, marking any failed scanner condition in red."""
     qualifies = bool(holding.get("qualifies"))
     selection = holding.get("selection_result") or {}
@@ -156,14 +212,39 @@ def _holding_row(holding: dict[str, Any]) -> str:
         cells.append(
             f"<td{class_attribute}>{html.escape(str(value), quote=True)}</td>"
         )
+    if allow_sell:
+        symbol = str(holding.get("tradingsymbol", "")).strip()
+        try:
+            quantity = Decimal(str(holding.get("quantity", "")))
+            can_sell = (
+                quantity.is_finite()
+                and quantity > 0
+                and quantity == quantity.to_integral_value()
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            can_sell = False
+        if can_sell and symbol:
+            action = (
+                f'<form method="post" action="/sell/{quote(symbol, safe="")}" '
+                'onsubmit="return confirm(\'Sell all current holdings at a limit '
+                'price 1% below fresh LTP?\')">'
+                '<button class="sell-button" type="submit">Sell all</button></form>'
+            )
+        else:
+            action = '<button class="sell-button" type="button" disabled>Sell all</button>'
+        cells.append(f"<td>{action}</td>")
     return f'<tr class="{row_class}">{"".join(cells)}</tr>'
 
 
-def _render_holding_grid(title: str, holdings: list[dict]) -> str:
+def _render_holding_grid(
+    title: str, holdings: list[dict], allow_sell: bool = False
+) -> str:
     """Render one portfolio group as a separate holdings grid."""
-    rows = "".join(_holding_row(holding) for holding in holdings)
+    rows = "".join(_holding_row(holding, allow_sell) for holding in holdings)
     if not rows:
-        rows = "<tr><td colspan='11' class='empty'>No holdings found.</td></tr>"
+        column_count = 12 if allow_sell else 11
+        rows = f"<tr><td colspan='{column_count}' class='empty'>No holdings found.</td></tr>"
+    sell_header = "<th>Action</th>" if allow_sell else ""
 
     return f"""
 <section class="portfolio-group">
@@ -171,7 +252,7 @@ def _render_holding_grid(title: str, holdings: list[dict]) -> str:
 <div class="table-wrap">
 <table><thead><tr>
 <th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>P&amp;L</th>
-<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Sideways</th><th>Volume Signal</th><th>Decision</th><th>Criteria</th>
+<th>Daily RSI (14)</th><th>MACD Histogram</th><th>Sideways</th><th>Volume Signal</th><th>Decision</th><th>Criteria</th>{sell_header}
 </tr></thead><tbody>{rows}</tbody></table>
 </div>
 </section>"""
@@ -187,8 +268,12 @@ def render_holdings(
     flagged_count = len(all_holdings) - qualifying_count
     
     # Swapped variable assignments to fix the UI grouping bug
-    regular_grid = _render_holding_grid("Kite Holdings", regular_holdings)
-    smallcase_grid = _render_holding_grid("Small Case Stocks", smallcase_holdings)
+    regular_grid = _render_holding_grid(
+        "Kite Holdings", regular_holdings, allow_sell=True
+    )
+    smallcase_grid = _render_holding_grid(
+        "Small Case Stocks", smallcase_holdings, allow_sell=True
+    )
 
     return HTMLResponse(
         f"""<!doctype html>
@@ -210,14 +295,17 @@ table {{ width: 100%; border-collapse: collapse; white-space: nowrap; }}
 th, td {{ border-bottom: 1px solid #e0e5e8; padding: 10px 12px; text-align: right; }}
 th {{ position: sticky; top: 0; background: #244b5a; color: #fff; font-weight: 600; }}
 th:first-child, td:first-child {{ text-align: left; }}
-td:last-child {{ text-align: left; white-space: normal; min-width: 280px; }}
+td:nth-child(11) {{ text-align: left; white-space: normal; min-width: 280px; }}
+td:nth-child(12) {{ text-align: center; }}
+.sell-button {{ border: 0; border-radius: 4px; padding: 7px 12px; background: #b42318; color: #fff; cursor: pointer; }}
+.sell-button:disabled {{ background: #9aa4ad; cursor: not-allowed; }}
 td.volume-blue {{ background: #d9eaf7 !important; color: #1f4e78 !important; font-weight: 700; }}
 td.volume-green {{ background: #c6efce !important; color: #006100 !important; font-weight: 700; }}
 td.volume-red {{ background: #ffc7ce !important; color: #9c0006 !important; font-weight: 700; }}
 td.volume-grey-noise {{ background: #d9d9d9 !important; color: #404040 !important; font-weight: 700; }}
 tr.flagged td {{ background: #fff0ef; color: #782b25; }}
 tr.qualifies td {{ background: #eff8f1; }}
-tr.flagged td:nth-last-child(2) {{ font-weight: 700; }}
+tr.flagged td:nth-child(10) {{ font-weight: 700; }}
 .empty {{ text-align: center !important; padding: 28px; color: #52616b; }}
 @media (max-width: 640px) {{ main {{ padding: 18px 12px; }} header {{ align-items: flex-start; }} h1 {{ font-size: 20px; }} .summary {{ flex-wrap: wrap; gap: 8px 16px; }} }}
 </style></head><body>
